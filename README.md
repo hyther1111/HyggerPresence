@@ -5,15 +5,15 @@ concept & logic: me
 
 code: me & grok
 
-time format logic explaination: me & grok makes it easier to understand
+time format logic explanation: me & grok makes it easier to understand
 
-# Time format logic brief explaination
+# Time format logic brief explanation
 yes i dont know how do i explain this perfectly so i tried to put example but turn out its still quite complex
 
 there is no {hh?} / {!hh} and their minutes and seconds variations since i think those wouldnt be needed anyways
 
 ### Token
-| Token | Explaination | Example format | Output |
+| Token | Explanation | Example format | Output |
 |---|---|---|---|
 | `{h}` / `{m}` / `{s}` | doesn't show 0 if value is single digit | `{h}h {m}m {s}s` | `1h 2m 3s` / `1h 23m 45s` |
 | `{hh}` / `{mm}` / `{ss}` | show 0 if value is single digit | `{hh}h {mm}m {ss}s` | `01h 02m 03s` / `01h 23m 45s` |
@@ -33,11 +33,11 @@ there is no {hh?} / {!hh} and their minutes and seconds variations since i think
 | `{!m}…{/!m}` | minutes == 0 | `{m?}{m}m {/m}{!m}{ss}s{/!m}` | 2m 3s | `2m ` |
 | | | | 0m 3s | `03s` |
 
-## Default time format explaination
+## Default time format explanation
 `{h?}{h}h {mm}m {ss}s{/h}{!h}{m?}{m}m {ss}s{/m}{!m}{s}s{/!m}{/!h}`
 
 ### break down into parts:
-| Variable | Explaination |
+| Variable | Explanation |
 |---|---|
 | `{h?}{h}h {mm}m {ss}s{/h}` | only show `{h}h {mm}m {ss}s` when hour > 0 |
 | `{m?}{m}m {ss}s{/m}` | only show `{m}m {ss}s` when minute > 0 |
