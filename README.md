@@ -27,19 +27,6 @@ there is no {hh?} / {!hh} and their minutes and seconds variations since i think
 | `{!m}…{/!m}` | minutes == 0 | `{m?}{m}m {/m}{!m}{ss}s{/!m}` | 2m 3s | `2m ` |
 | | | | 0m 3s | `03s` |
 
-**Short version for a README:**
-
-| Syntax | Meaning |
-|--------|---------|
-| `{h?}…{/h}` | include `…` only if hours > 0 |
-| `{m?}…{/m}` | only if minutes > 0 |
-| `{s?}…{/s}` | only if seconds > 0 |
-| `{!h}…{/!h}` | only if hours == 0 |
-| `{!m}…{/!m}` | only if minutes == 0 |
-| `{!s}…{/!s}` | only if seconds == 0 |
-
-Avoid placeholder junk like `123` / `456` — always use real time parts (`{h}`, `{mm}`, etc.) so the Expected Output column stays obvious.
-
 ## Default time format explaination
 `{h?}{h}h {mm}m {ss}s{/h}{!h}{m?}{m}m {ss}s{/m}{!m}{s}s{/!m}{/!h}`
 
