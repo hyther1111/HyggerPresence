@@ -2,6 +2,7 @@
 visual novel presence built for myself and add features that i needed (locale emulator and galfc support)
 
 concept & logic: me
+
 code: grok
 
 # Time format logic brief explaination
