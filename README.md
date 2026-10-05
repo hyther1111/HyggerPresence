@@ -1,6 +1,9 @@
 # HyggerPresence
 visual novel presence built for myself and add features that i needed (locale emulator and galfc support)
 
+concept & logic: me
+code: grok
+
 # Time format logic brief explaination
 yes i dont know how do i explain this perfectly so i tried to put example but turn out its still quite complex
 
