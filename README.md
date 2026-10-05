@@ -3,7 +3,7 @@ visual novel presence built for myself and add features that i needed (locale em
 
 concept & logic: me
 
-code: grok
+code: me & grok
 
 time format logic explaination: me & grok makes it easier to understand
 
