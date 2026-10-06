@@ -14,7 +14,7 @@ time format logic explanation: me & grok makes it easier to understand
 it was used for connecting to discord, default application name and icon, also affects what it shows when someone request to stream in vc
 
 # Known issue
-2 games with same file name will detect the one that is added first, can be simply fix by renaming the file name, i may fix this later when i feel like it is needed
+2 games with same file name will detect the one that is being added first, can be simply fix by renaming the file, i may fix this later when i feel like it is needed
 
 # How to use
 click add game and follow instructions and there you go
