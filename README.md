@@ -13,8 +13,18 @@ time format logic explanation: me & grok makes it easier to understand
 ### Why it requires Discord Application ID?
 it was used for connecting to discord, default application name and icon, also affects what it shows when someone request to stream in vc
 
+### How to get Discord Application ID and connect?
+1. https://discord.com/developers/applications
+2. New Application
+3. Type in name (remember it also matters in Request to Stream for voice channels, you can upload any image you want to be shown in Request to Stream after you create the application)
+4. Select anything in Team
+5. Create
+6. It should redirect you right into General Information which is where Application ID locates at
+7. Click "Copy" under Application ID
+8. Paste it in the app and click "Save ID"
+
 # Known issue
-2 games with same file name will detect the one that is being added first, can be simply fix by renaming the file, i may fix this later when i feel like it is needed
+2 games with same file name will detect the one that is being added first, can be simply fixed by renaming the file, i may fix this later when i feel like it is needed
 
 # How to use
 click add game and follow instructions and there you go
