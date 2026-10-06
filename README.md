@@ -1,11 +1,29 @@
 # HyggerPresence
+### !!! the program starts as tray so you have to go bottom right, right click the icon and click Open !!!
 visual novel presence built for myself and add features that i needed (locale emulator and galfc support)
+
+time tracker, custom launcher, customizable presence settings
 
 concept & logic: me
 
 code: me & grok
 
 time format logic explanation: me & grok makes it easier to understand
+
+### Why it requires Discord Application ID?
+it was used for connecting to discord, default application name and icon, also affects what it shows when someone request to stream in vc
+
+# Known issue
+2 games with same file name will detect the one that is added first, can be simply fix by renaming the file name, i may fix this later when i feel like it is needed
+
+# How to use
+click add game and follow instructions and there you go
+
+you can add launchers like locale emulator/galfc, by default there is locale emulator and galfc, you just have to browse where they locate and add them
+
+locale emulator profiles will be detected automatically upon browse
+
+later on you can just start your vn within the app
 
 # Time format logic brief explanation
 yes i dont know how do i explain this perfectly so i tried to put example but turn out its still quite complex
