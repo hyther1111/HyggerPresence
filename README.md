@@ -24,9 +24,10 @@ it was used for connecting to discord, default application name and icon, also a
 8. Paste it in the app and click "Save ID"
 
 # Known issues
-1. 2 games with same file name will detect the one that is being added first, can be simply fixed by renaming the file, i may fix this later when i feel like it is needed
-
+1. 2 games with same file name will detect the one that is being added first, can be simply fixed by renaming the file, i may fix this later when i feel like it is needed (fixed in 1.0.1)
 2. UI is bugged for some people, idk how did that happen but i may fix if im not lazy
+3. "Force Clear Presence" will reset session time which it is not supposed to (fixed in 1.0.1)
+4. discord status wont reconnect when discord disconnects/restarts (fixed in 1.0.1)
 
 # How to use
 click add game and follow instructions and there you go
