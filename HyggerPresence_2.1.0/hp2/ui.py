@@ -2784,8 +2784,30 @@ class ScreenshotMixin:
         threading.Thread(target=save_in_background, daemon=True).start()
 
     def _after_screenshot(self):
-        """The file watcher already refreshes the page; do not rebuild it twice."""
-        return
+        """Rebuild once, 1.5 s after the last shot, instead of after every one."""
+        page = getattr(self, "shots_page", None)
+        if page is None:
+            return
+        page._dirty = True
+        timer = getattr(self, "_shot_refresh_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(1500)
+            timer.timeout.connect(self._flush_shot_refresh)
+            self._shot_refresh_timer = timer
+        timer.start()
+
+    def _flush_shot_refresh(self):
+        page = getattr(self, "shots_page", None)
+        if page is None or not page._dirty:
+            return
+        page._dirty = False
+        if page.isVisible():
+            page._fill()
+
+    def _push_shot_count(self):
+        return 0
 
     def _on_hotkey(self, _name):
         self.take_screenshot()

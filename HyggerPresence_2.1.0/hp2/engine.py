@@ -23,7 +23,9 @@ MAX_LINE = 128
 RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
 KEEPALIVE = 40.0            # Discord drops an activity that is not refreshed; 1.0.x used 55 s
-MIN_PUSH_INTERVAL = 4.2        # 5 updates per 20 s is Discord's limit             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
+MIN_PUSH_INTERVAL = 1.5        # floor between two sends
+PUSH_BURST = 5                 # Discord allows 5 updates ...
+PUSH_WINDOW = 20.0             # ... per 20 s, so allow exactly that             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
 STATUS_DEBOUNCE = 0.6        # a new status must hold this long before it is pushed
 
 
@@ -780,7 +782,9 @@ class Engine(DetectorMixin):
             identity_changed = identity != self._pushed_identity
             status_changed = status != self._pushed_status
             if status != self.status:
-                debug_log("status %s -> %s (candidate)" % (self.status, status))
+                debug_log("status %s -> %s (candidate, push in %.1fs)"
+                          % (self.status, status,
+                             max(0.0, STATUS_DEBOUNCE - (now - candidate[1]))))
             self.status = status
             self.preview = self._build_preview(game, status)
             now_i = int(now)
@@ -795,6 +799,9 @@ class Engine(DetectorMixin):
                                  self._session_exe, self._pushed_status))
                 except Exception:
                     pass
+            if status_changed and not (stable or first_push):
+                debug_log("status %s waiting: %.1fs of %.1fs settled"
+                          % (status, now - candidate[1], STATUS_DEBOUNCE))
             should_push = (identity_changed
                            or (status_changed and (stable or first_push))
                            or now - self._last_sent >= KEEPALIVE)
@@ -871,10 +878,17 @@ class Engine(DetectorMixin):
         if not preview or now < self._next_push_at:
             return False
         if self._last_sent and now - self._last_sent < MIN_PUSH_INTERVAL:
-            return False           # throttled, the caller retries later
-        if now - getattr(self, "_last_push_begin", 0.0) < 1.2:
-            debug_log("push skipped: another one started %.2fs ago"
-                      % (now - getattr(self, "_last_push_begin", 0.0)))
+            debug_log("push throttled: %.2fs since the last send"
+                      % (now - self._last_sent))
+            return False
+        if now - getattr(self, "_last_push_begin", 0.0) < 0.3:
+            return False
+        sent_times = [stamp for stamp in getattr(self, "_sent_log", [])
+                      if now - stamp < PUSH_WINDOW]
+        self._sent_log = sent_times
+        if len(sent_times) >= PUSH_BURST:
+            debug_log("push throttled: %d updates in the last %.0fs"
+                      % (len(sent_times), PUSH_WINDOW))
             return False
         self._last_push_begin = now
         try:
@@ -907,6 +921,8 @@ class Engine(DetectorMixin):
             if preview.get("start") and opts.get("show_timer", True):
                 kwargs["start"] = preview["start"]
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            self._sent_log = getattr(self, "_sent_log", [])
+            self._sent_log.append(now)
             self._push_token += 1
             self._submit(self._do_push, kwargs, game.get("image"), self._push_token)
             return True
