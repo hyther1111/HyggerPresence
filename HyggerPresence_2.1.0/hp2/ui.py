@@ -1205,6 +1205,14 @@ def _short_time(seconds):
 
 
 EDGE = 16
+
+CARD_QSS = ("QFrame#card{background:%(surface)s;border-radius:8px;border:%(border)s;}"
+            "QFrame#card:hover{background:%(surface2)s;}")
+
+MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(border)s;}"
+            "QMenu::item:disabled{color:%(subtext)s;}"
+            "QMenu::item:disabled:selected{background:transparent;}"
+            "QMenu::item:selected{background:%(accent)s;color:#ffffff;}")
 APP_VERSION = "2.1.0"          # one inset for the title bar, the sidebar and the status bar
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
@@ -2280,7 +2288,12 @@ class ScreenshotPage(Page):
 
     def _game_pressed(self, event, folder):
         if event.button() == Qt.RightButton:
-            shots.open_folder(self._shot_store().folder_for(folder))
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self)
+            menu.setStyleSheet(MENU_QSS % self.window.palette)
+            action = menu.addAction(tr("Open folder"))
+            if menu.exec(event.globalPosition().toPoint()) is action:
+                shots.open_folder(self._shot_store().folder_for(folder))
             return
         if event.button() != Qt.LeftButton:
             return
@@ -2295,12 +2308,12 @@ class ScreenshotPage(Page):
         self._paint_selection()
 
     def _paint_selection(self):
+        accent = self.window.palette.get("accent", "#5b8def")
         for key, card in self._cards.items():
-            if not hasattr(card, "setProperty"):
+            if not hasattr(card, "setStyleSheet"):
                 continue
-            card.setProperty("selected", "true" if key in self._selection else "false")
-            card.style().unpolish(card)
-            card.style().polish(card)
+            border = ("1px solid %s" % accent) if key in self._selection else "none"
+            card.setStyleSheet(CARD_QSS % dict(self.window.palette, border=border))
 
     def _apply_selection_style(self):
         style = self.styleSheet()
@@ -2320,6 +2333,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         from PySide6.QtWidgets import QMenu
         from PySide6.QtGui import QCursor
         menu = QMenu(self)
+        menu.setStyleSheet(MENU_QSS % self.window.palette)
         count = len(self._selection)
         single = count == 1
         copy = menu.addAction(tr("Copy"))
@@ -2525,6 +2539,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         card.setObjectName("card")
         card.setCursor(Qt.PointingHandCursor)
         card.setFixedWidth(self.COVER[0] + 30)
+        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="none"))
         lay = QVBoxLayout(card)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(6)
@@ -2556,6 +2571,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         card.setObjectName("card")
         card.setCursor(Qt.PointingHandCursor)
         card.setFixedWidth(self.THUMB[0] + 16)
+        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="none"))
         lay = QVBoxLayout(card)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(4)
@@ -2860,35 +2876,38 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
 
     def _build_variables(self):
         page, layout = self._page()
-        theme = self.window.palette
-        rows = []
+        self._variable_pills = {}
         for token, description in self.VARIABLES:
             translated = tr(description)
             parts = translated.split("\u2013", 1)
             explanation = parts[1].strip() if len(parts) > 1 else translated
-            rows.append(
-                '<div style="margin-bottom:7px;">'
-                '<a href="%s" style="font-family:Consolas,\'Courier New\',monospace;'
-                ' background:%s; padding:2px 6px; border-radius:4px; color:%s;'
-                ' text-decoration:none;">%s</a>&nbsp;&nbsp;'
-                '<span style="color:%s;">%s</span></div>'
-                % (token, theme["surface2"], theme["text"], token,
-                   theme["subtext"], explanation))
-        self._variables_label = QLabel("".join(rows))
-        self._variables_label.setTextFormat(Qt.RichText)
-        self._variables_label.setWordWrap(True)
-        self._variables_label.setTextInteractionFlags(Qt.TextSelectableByMouse
-                                                      | Qt.LinksAccessibleByMouse)
-        self._variables_label.setOpenExternalLinks(False)
-        self._variables_label.linkActivated.connect(self._copy_token)
-        layout.addWidget(self._variables_label)
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            pill = QLabel(token)
+            pill.setCursor(Qt.PointingHandCursor)
+            pill.setToolTip(tr("Click to copy"))
+            pill.setStyleSheet(
+                "QLabel{font-family:Consolas,'Courier New',monospace;background:%s;"
+                "color:%s;padding:2px 6px;border-radius:4px;}"
+                % (self.window.palette["surface2"], self.window.palette["text"]))
+            pill.mousePressEvent = lambda _e, tk=token, pl=pill: self._copy_token(tk, pl)
+            line.addWidget(pill)
+            text = QLabel(explanation)
+            text.setWordWrap(True)
+            line.addWidget(text, 1)
+            layout.addWidget(row)
+            self._variable_pills[token] = pill
         layout.addStretch(1)
         return page
 
-    def _copy_token(self, token):
+    def _copy_token(self, token, pill=None):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(token)
-        self.window.flash_status(tr("Copied %s") % token)
+        if pill is not None:
+            pill.setText("\u2713")
+            QTimer.singleShot(700, lambda: pill.setText(token))
 
     def refresh_variables(self):
         if not hasattr(self, "_variables_label"):
