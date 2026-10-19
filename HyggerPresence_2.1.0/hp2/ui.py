@@ -8,6 +8,7 @@ clicks.
 Icons are painted with QPainter (sun / moon / window buttons) so they look the
 same on every machine and never change the layout when the theme flips.
 """
+import os
 import threading
 import threading
 import time
@@ -2007,9 +2008,76 @@ class ScreenshotPage(Page):
         self.empty.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.empty)
 
+        # Escape must work even when the focus sits on a nav button
+        from PySide6.QtWidgets import QApplication
+
+        page = self
+
+        class _Escape(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() != QEvent.KeyPress or event.key() != Qt.Key_Escape:
+                    return False
+                if not page.isVisible() or page._view == "games":
+                    return False
+                page.go_back()
+                return True
+
+        self._escape_filter = _Escape(self)
+        QApplication.instance().installEventFilter(self._escape_filter)
+
+        self._thumb_jobs = []
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(8)
+        self._thumb_timer.timeout.connect(self._load_next_thumbs)
+
         self.refresh()
 
     # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _thumb_cache_dir():
+        root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
+        return Path(root) / "HyggerPresence" / "thumbs"
+
+    def _cached_thumb(self, path, size):
+        """Thumbnails are cached on disk, like Explorer does."""
+        import hashlib
+        try:
+            stat = path.stat()
+        except OSError:
+            return QPixmap()
+        key = hashlib.md5(("%s|%d|%d|%dx%d" % (path, stat.st_mtime_ns, stat.st_size,
+                                               size[0], size[1])).encode()).hexdigest()
+        cache = self._thumb_cache_dir() / ("%s.png" % key)
+        if cache.exists():
+            pixmap = QPixmap(str(cache))
+            if not pixmap.isNull():
+                return pixmap
+        pixmap = self._fast_pixmap(path, size)
+        if not pixmap.isNull():
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                pixmap.save(str(cache), "PNG")
+            except Exception:
+                pass
+        return pixmap
+
+    def _load_next_thumbs(self):
+        """Fill placeholders a few at a time so the page never freezes."""
+        if not self._thumb_jobs:
+            self._thumb_timer.stop()
+            return
+        for _ in range(6):
+            if not self._thumb_jobs:
+                self._thumb_timer.stop()
+                return
+            label, path = self._thumb_jobs.pop(0)
+            try:
+                pixmap = self._cached_thumb(path, self.THUMB)
+                if not pixmap.isNull() and label is not None:
+                    label.setPixmap(pixmap)
+            except RuntimeError:
+                pass
+
     def _shot_store(self):
         return getattr(self.window, "shot_store", None) or shots.ScreenshotStore()
 
@@ -2149,9 +2217,16 @@ class ScreenshotPage(Page):
             paths = store_.shots_for(self._folder)
             self.count_label.setText(tr("%d screenshot(s)") % len(paths))
             columns = self._columns(width, self.THUMB)
+            self._thumb_jobs = []
             for index, path in enumerate(paths):
-                grid.addWidget(self._shot_card(path), index // columns, index % columns)
+                card, art = self._shot_card(path, deferred=True)
+                grid.addWidget(card, index // columns, index % columns)
                 self._cards[str(path)] = True
+                self._thumb_jobs.append((art, path))
+            if self._thumb_jobs:
+                self._thumb_timer.start()
+            else:
+                self._thumb_timer.stop()
             self.empty.setText(tr("No screenshots"))
             self.empty.setVisible(not paths)
             grid.setRowStretch(len(paths) // columns + 1, 1)
@@ -2208,7 +2283,7 @@ class ScreenshotPage(Page):
         card.mouseDoubleClickEvent = lambda _e, f=folder: self.open_folder(f)
         return card
 
-    def _shot_card(self, path):
+    def _shot_card(self, path, deferred=False):
         card = QFrame()
         card.setObjectName("card")
         card.setCursor(Qt.PointingHandCursor)
@@ -2221,16 +2296,19 @@ class ScreenshotPage(Page):
         art.setAlignment(Qt.AlignCenter)
         art.setStyleSheet("QLabel{background:%s;border-radius:4px;}"
                           % self.window.palette["surface2"])
-        pixmap = self._fast_pixmap(path, self.THUMB)
-        if not pixmap.isNull():
-            art.setPixmap(pixmap)
+        if deferred:
+            pass                      # _fill() queues the job after adding the card
+        else:
+            pixmap = self._cached_thumb(path, self.THUMB)
+            if not pixmap.isNull():
+                art.setPixmap(pixmap)
         lay.addWidget(art, 0, Qt.AlignHCenter)
         name = QLabel(path.name)
         name.setObjectName("sub")
         name.setWordWrap(True)
         lay.addWidget(name)
         card.mouseDoubleClickEvent = lambda _e, p=path: self.open_shot(p)
-        return card
+        return card, art
 
     # ------------------------------------------------------------------ actions
     def _copy_shot(self):
@@ -2239,12 +2317,26 @@ class ScreenshotPage(Page):
             QApplication.clipboard().setPixmap(QPixmap(str(self._shot)))
 
     def _open_shot(self):
-        """Open in whatever the user has associated with PNG (Photos, IrfanView...)."""
-        if self._shot and self._shot.exists():
-            try:
-                os.startfile(str(self._shot))
-            except Exception:
-                pass
+        """Open in the program associated with PNG; explorer covers odd setups."""
+        if not (self._shot and self._shot.exists()):
+            return
+        target = str(self._shot)
+        try:
+            os.startfile(target)
+            return
+        except Exception:
+            pass
+        try:
+            import subprocess
+            subprocess.Popen(["explorer", target])
+            return
+        except Exception:
+            pass
+        try:
+            import subprocess
+            subprocess.Popen(["rundll32", "shell32.dll,ShellExec_RunDLL", target])
+        except Exception:
+            pass
 
     def _reveal_shot(self):
         if self._shot and self._shot.exists():
@@ -2335,19 +2427,18 @@ class ScreenshotMixin:
         if not self.game_in_foreground():
             return
 
-        def grab():
-            pixmap = shots.capture_window()
-            if pixmap is None:
-                return
-            try:
-                self.shot_store.save(pixmap, self.current_game_title()
-                                     or shots.FOLDER_FALLBACK)
-            except Exception:
-                return
-            if hasattr(self, "shots_page"):
-                self.shots_page.refresh()
-
-        QTimer.singleShot(180, grab)
+        # No delay: the window does not move away, and a delayed grab used to
+        # capture whatever had the focus by then.
+        pixmap = shots.capture_window()
+        if pixmap is None:
+            return
+        try:
+            self.shot_store.save(pixmap, self.current_game_title()
+                                 or shots.FOLDER_FALLBACK)
+        except Exception:
+            return
+        if hasattr(self, "shots_page"):
+            self.shots_page.refresh()
 
     def _on_hotkey(self, _name):
         self.take_screenshot()
