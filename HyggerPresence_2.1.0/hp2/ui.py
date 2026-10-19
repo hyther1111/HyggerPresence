@@ -3478,7 +3478,11 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
     # ------------------------------------------------------------ data actions
     def _reload_data(self):
         window = self.window
-        window.config = store.load_config()
+        fresh = store.load_config()
+        # update in place: window.config and app.config must stay the same object
+        window.config.clear()
+        window.config.update(fresh)
+        window.app.config = window.config
         window.engine.games = store.load_games()
         window.engine.client_id = window.config.get("client_id", "")
         window.engine.templates = window.config.get("templates") or DEFAULT_TEMPLATES
@@ -5267,7 +5271,9 @@ class Application:
             except Exception:
                 pass
         try:
-            store.save_config(self.config)
+            # the window owns the live config; self.config may be a stale dict
+            live = getattr(getattr(self, "window", None), "config", None) or self.config
+            store.save_config(live)
         except Exception:
             pass
         try:
