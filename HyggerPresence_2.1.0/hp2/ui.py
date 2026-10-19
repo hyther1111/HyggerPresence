@@ -2811,8 +2811,22 @@ class ScreenshotMixin:
         elif mode == "window":
             whole_screen = False
         else:
-            # Auto: an upscaler showing the game owns the foreground window
+            # Auto: an upscaler is in front when its process matches, or when
+            # whatever is in front covers the screen while our game is smaller.
             whole_screen = shots.foreground_is_upscaler()
+            if not whole_screen:
+                foreground = shots.foreground_process_name()
+                game_exe = (self.engine.game or {}).get("exe") or ""
+                game_name = Path(game_exe).name.lower() if game_exe else ""
+                if foreground and foreground != game_name and shots.foreground_fills_screen():
+                    whole_screen = True
+            try:
+                debug_log("auto capture: foreground=%r fills=%s -> %s"
+                          % (shots.foreground_process_name(),
+                             shots.foreground_fills_screen(),
+                             "screen" if whole_screen else "window"))
+            except Exception:
+                pass
         if whole_screen:
             # upscalers draw in their own window, the game itself may be tiny
             if not self.engine.game:

@@ -4,11 +4,13 @@
 
 ### Added
 - **Capture area: auto, game window or whole screen.** In the default `Auto`
-  mode the app looks at the foreground window: while an upscaler (Magpie, or any
-  other window whose process name contains "Magpie" / "Lossless Scaling") is on
-  screen, the whole composited desktop is captured at native resolution; the rest
-  of the time only the game's client area is taken. Nothing is hidden for the
-  grab, because an upscaler being in front means this window is not.
+  mode the app looks at the foreground window: while an upscaler is showing the
+  game, the whole composited desktop is captured at native resolution; the rest
+  of the time only the game's client area is taken. An upscaler is recognised
+  either by its process name (Magpie, Lossless Scaling) or by geometry - a
+  window that belongs to another process and covers the screen while the game
+  window itself does not. Nothing is hidden for the grab, because an upscaler
+  being in front means this window is not.
 - **Trim black bars.** Captures drop uniform black borders (left/right or
   top/bottom), which is what upscalers add when the game keeps its original
   aspect ratio. On by default; a dark scene is left untouched because both sides

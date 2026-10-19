@@ -260,6 +260,25 @@ def foreground_process_name():
         return ""
 
 
+def foreground_fills_screen(tolerance=0.9):
+    """True when the foreground window covers (almost) the whole screen."""
+    hwnd = foreground_hwnd()
+    screen = QGuiApplication.primaryScreen()
+    if not hwnd or screen is None:
+        return False
+    rect = _RECT()
+    try:
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+    except Exception:
+        return False
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    geometry = screen.geometry()
+    return (width >= geometry.width() * tolerance
+            and height >= geometry.height() * tolerance)
+
+
 def foreground_is_upscaler():
     """True while an upscaler window is the one on screen."""
     name = foreground_process_name()
