@@ -132,36 +132,7 @@ def trim_bars(pixmap, threshold=12, inset=4):
     top = run(0, half_h, 1, row_dark)
     bottom = run(height - 1, half_h - 1, -1, row_dark)
 
-    def uniform(line):
-        """True when a whole row/column is a single colour (a window edge)."""
-        values = [line(x) for x in range(0, width)]
-        first = values[0]
-        return all(abs(v - first) <= 6 for v in values[1:])
-
     if left + right + top + bottom == 0:
-        # no black bar, but Windows can leave a 1 px client edge: a column that
-        # is one flat colour and differs from its neighbour is not game content
-        if width > 48 and height > 48:
-            edge_left = uniform(lambda x: image.pixel(0, height // 2))
-            edge_right = uniform(lambda x: image.pixel(width - 1, height // 2))
-            inner_left = image.pixel(1, height // 2)
-            inner_right = image.pixel(width - 2, height // 2)
-            if edge_left and edge_right and inner_left != image.pixel(0, height // 2):
-                inner = image.pixel(2, height // 2)
-                drop = 0
-                while drop < 3 and image.pixel(drop, height // 2) not in (inner,):
-                    drop += 1
-                if 0 < drop <= 2:
-                    cropped = pixmap.copy(QRect(drop, 0, width - 2 * drop, height))
-                    if not cropped.isNull():
-                        try:
-                            from .core import debug_log
-                            debug_log("trim edge %dx%d -> %dx%d"
-                                      % (width, height, cropped.width(),
-                                         cropped.height()))
-                        except Exception:
-                            pass
-                        return cropped
         return pixmap
     rect = QRect(left, top, max(8, width - left - right),
                  max(8, height - top - bottom))
