@@ -24,7 +24,7 @@ RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
 KEEPALIVE = 55.0
 MIN_PUSH_INTERVAL = 4.2        # 5 updates per 20 s is Discord's limit             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
-STATUS_DEBOUNCE = 0.5        # a new status must hold this long before it is pushed
+STATUS_DEBOUNCE = 2.0        # a new status must hold this long before it is pushed
 
 
 def _clip(value, limit=MAX_LINE):
@@ -569,9 +569,15 @@ class Engine(DetectorMixin):
         folder_b = self._folder_of(second)
         return bool(folder_a) and folder_a == folder_b
 
+    @staticmethod
+    def _game_key(game):
+        """Stable identity of a game for session bookkeeping."""
+        return (game.get("exe") or "", game.get("vndb_id") or "",
+                game.get("title") or game.get("original") or "")
+
     def _apply_clock(self, game, status, now):
         """1.0.4 behaviour: session belongs to the current game, nothing remembered."""
-        if self._session_exe != game.get("exe"):
+        if self._session_exe != self._game_key(game):
             previous = self._session_exe
             if self._reading_start is not None:
                 # bank the stretch that is still running before switching away
@@ -593,7 +599,7 @@ class Engine(DetectorMixin):
                 # the game swapped its own executable: the session continues
                 self._session_memory.pop(previous, None)
                 self._grace = None
-                self._session_exe = exe
+                self._session_exe = self._game_key(game)
                 self._reading_start = None
                 self.session_seconds = self._session_accumulated
                 self.total_seconds = game.get("total_seconds", 0)
@@ -605,7 +611,7 @@ class Engine(DetectorMixin):
                         self._session_memory[previous] = self._session_accumulated
                     else:
                         self._session_memory.pop(previous, None)
-                self._session_exe = exe
+                self._session_exe = self._game_key(game)
                 self._session_accumulated = self._session_memory.pop(exe, 0.0)
             self._reading_start = None
             self.session_seconds = self._session_accumulated
