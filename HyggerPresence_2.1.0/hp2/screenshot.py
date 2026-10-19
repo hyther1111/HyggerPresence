@@ -220,18 +220,50 @@ def capture_window():
     return None
 
 
-_last_beep = [0.0]
+SHUTTER_NAMES = ("screenshot.wav", "shutter.wav")
 
 
-def beep():
-    """Short confirmation sound. Alias sounds queue up, so use MessageBeep."""
-    import time as _time
-    now = _time.time()
-    if now - _last_beep[0] < 0.12:          # spamming must not queue up sounds
-        return False
-    _last_beep[0] = now
+def sound_file(chosen=""):
+    """A camera shutter sound dropped next to the data wins over the system one."""
+    if chosen:
+        candidate = Path(chosen)
+        if candidate.exists():
+            return candidate
+    try:
+        from .core import APP_DIR
+    except Exception:
+        return None
+    for name in SHUTTER_NAMES:
+        candidate = Path(APP_DIR) / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def beep(sound_path=""):
+    """Play the shutter sound immediately, cutting off the previous one."""
     try:
         import winsound
+    except Exception:
+        return False
+    custom = sound_file(sound_path)
+    if custom is not None:
+        try:
+            winsound.PlaySound(str(custom),
+                               winsound.SND_FILENAME | winsound.SND_ASYNC
+                               | winsound.SND_NODEFAULT)
+            return True
+        except Exception:
+            pass
+    try:
+        # SND_ASYNC stops whatever is still playing, so spamming is fine
+        winsound.PlaySound("SystemAsterisk",
+                           winsound.SND_ALIAS | winsound.SND_ASYNC
+                           | winsound.SND_NODEFAULT)
+        return True
+    except Exception:
+        pass
+    try:
         winsound.MessageBeep(winsound.MB_ICONASTERISK)
         return True
     except Exception:

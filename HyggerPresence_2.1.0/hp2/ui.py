@@ -1904,8 +1904,39 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("Click the field and press a key combination. "
                               "Escape removes it."))
 
+        layout.addSpacing(12)
+        layout.addWidget(QLabel(tr("Sound")))
+        sound_row = QHBoxLayout()
+        self.shot_sound = QLineEdit(opts.get("sound") or "")
+        self.shot_sound.setReadOnly(True)
+        self.shot_sound.setPlaceholderText(tr("System default"))
+        sound_row.addWidget(self.shot_sound, 1)
+        pick = QPushButton(tr("Choose…"))
+        pick.clicked.connect(self._pick_sound)
+        sound_row.addWidget(pick)
+        test = QPushButton(tr("Test"))
+        test.clicked.connect(lambda: self.window.play_sound())
+        sound_row.addWidget(test)
+        clear_sound = QPushButton(tr("Clear"))
+        clear_sound.clicked.connect(self._clear_sound)
+        sound_row.addWidget(clear_sound)
+        layout.addLayout(sound_row)
+        self._help(layout, tr("WAV file played after each screenshot."))
         layout.addStretch(1)
         return page
+
+    def _pick_sound(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _f = QFileDialog.getOpenFileName(self, tr("Choose a sound"), "",
+                                               tr("Sound files (*.wav)"))
+        if path:
+            self.shot_sound.setText(path)
+            self.window.set_sound(path)
+
+    def _clear_sound(self):
+        self.shot_sound.setText("")
+        self.shot_sound.setPlaceholderText(tr("System default"))
+        self.window.set_sound("")
 
     def _bind_hotkey_click(self, event):
         self.window.start_hotkey_capture(self.shot_hotkey)
@@ -2016,12 +2047,20 @@ class ScreenshotPage(Page):
 
         class _Escape(QObject):
             def eventFilter(self, obj, event):
-                if event.type() != QEvent.KeyPress or event.key() != Qt.Key_Escape:
+                if event.type() != QEvent.KeyPress or not page.isVisible():
                     return False
-                if not page.isVisible() or page._view == "games":
-                    return False
-                page.go_back()
-                return True
+                if event.key() == Qt.Key_Escape:
+                    if page._view == "games":
+                        return False
+                    page.go_back()
+                    return True
+                if event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+                    page.select_all()
+                    return True
+                if event.key() == Qt.Key_Delete:
+                    page.delete_selection()
+                    return True
+                return False
 
         self._escape_filter = _Escape(self)
         QApplication.instance().installEventFilter(self._escape_filter)
@@ -2225,13 +2264,14 @@ class ScreenshotPage(Page):
             return
         if event.button() != Qt.LeftButton:
             return
+        key = str(path)
         if QApplication.keyboardModifiers() & Qt.ControlModifier:
-            if path in self._selection:
-                self._selection.discard(path)
+            if key in self._selection:
+                self._selection.discard(key)
             else:
-                self._selection.add(path)
+                self._selection.add(key)
         else:
-            self._selection = {str(path)}
+            self._selection = {key}
         self._paint_selection()
 
     def _paint_selection(self):
@@ -2256,13 +2296,25 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         self._selection = set(self._cards.keys())
         self._paint_selection()
 
-    def _show_menu(self, event):
+    def _show_menu(self, event=None, position=None):
         from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QCursor
         menu = QMenu(self)
-        delete = menu.addAction(tr("Delete"))
-        action = menu.exec(event.globalPosition().toPoint())
+        delete = menu.addAction(tr("Delete") + (" (%d)" % len(self._selection)
+                                                if self._selection else ""))
+        delete.setEnabled(bool(self._selection))
+        where = position or (event.globalPosition().toPoint() if event is not None
+                             else QCursor.pos())
+        action = menu.exec(where)
         if action is delete:
             self.delete_selection()
+
+    def contextMenuEvent(self, event):
+        if self._view == "folder":
+            self._show_menu(position=event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def delete_selection(self):
         paths = [Path(p) for p in self._selection if Path(p).exists()]
@@ -2580,7 +2632,7 @@ class ScreenshotMixin:
         pixmap = shots.capture_window()
         if pixmap is None:
             return
-        shots.beep()
+        shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
         title = self.current_game_title() or shots.FOLDER_FALLBACK
         store_ = self.shot_store
 
@@ -2599,6 +2651,14 @@ class ScreenshotMixin:
 
     def _on_hotkey(self, _name):
         self.take_screenshot()
+
+    def set_sound(self, path):
+        opts = self.config.setdefault("screenshot", {})
+        opts["sound"] = path or ""
+        store.save_config(self.config)
+
+    def play_sound(self):
+        shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
 
     def set_hotkey(self, spec):
         opts = self.config.setdefault("screenshot", {})
