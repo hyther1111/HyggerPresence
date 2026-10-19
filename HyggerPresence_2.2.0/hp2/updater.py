@@ -81,6 +81,10 @@ def update_script(new_exe, target):
     return (
         "@echo off\r\n"
         "setlocal\r\n"
+        'set "_MEIPASS2="\r\n'
+        'set "_MEIPASS="\r\n'
+        'set "PYTHONHOME="\r\n'
+        'set "PYTHONPATH="\r\n'
         ":wait\r\n"
         'tasklist /FI "PID eq @PID@" 2>NUL | find "@PID@" >NUL\r\n'
         "if not errorlevel 1 (\r\n"
@@ -119,5 +123,9 @@ def apply_update(asset):
         return False, "The download looks incomplete (%d bytes)." % size
     script = new_exe.parent / "hygger_update.bat"
     script.write_text(update_script(new_exe, target), encoding="ascii", errors="ignore")
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=0x08000000, close_fds=True)
+    # do not hand our PyInstaller environment to the updater
+    clean_env = {key: value for key, value in os.environ.items()
+                 if not key.upper().startswith(("_MEI", "PYTHON"))}
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=0x08000000,
+                     close_fds=True, env=clean_env)
     return True, "Restarting to finish the update."

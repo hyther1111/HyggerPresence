@@ -8,6 +8,7 @@ clicks.
 Icons are painted with QPainter (sun / moon / window buttons) so they look the
 same on every machine and never change the layout when the theme flips.
 """
+import os
 import threading
 import threading
 import time
@@ -16,14 +17,14 @@ from pathlib import Path
 from PySide6.QtCore import (QDate, QEasingCurve, QEvent, QObject, QPoint,
                             QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer,
                             Signal)
-from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen,
+from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath, QPen,
                            QPixmap)
 from PySide6.QtWidgets import (QApplication, QComboBox, QCheckBox,
                                QDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QSizeGrip, QStackedWidget,
-                               QListWidget, QListWidgetItem, QTabWidget,
+                               QListWidget, QListWidgetItem, QSpinBox, QTabWidget,
                                QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -32,6 +33,11 @@ from . import updater
 from . import winframe
 from . import i18n
 from .i18n import LANGUAGES, set_language, tr
+from .core import debug_log
+from . import screenshot as shots
+from . import windowtool
+from .hotkey import HotkeyManager, describe, from_qt
+from . import hotkey as hotkey_mod
 from .stats import StatsStore
 from . import store
 
@@ -210,7 +216,14 @@ def qss(p):
     QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right;
                width: 18px; border: none; background: transparent; }}
     QComboBox::down-arrow {{ image: url({p['arrow']}); width: 9px; height: 9px; }}
-    QComboBox QAbstractItemView::item {{ padding: 4px 6px; border: none; }}
+    QLabel#pill {{ font-family: Consolas, "Courier New", monospace;
+    background: {p['surface2']}; color: {p['text']};
+    padding: 2px 8px; border-radius: 4px; }}
+QLabel#tick {{ background: transparent; color: {p['green']}; }}
+QComboBox QAbstractItemView::item {{ padding: 4px 6px; border: none;
+    color: {p['text']}; }}
+QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
+    color: #ffffff; }}
     QToolButton#cover {{ background: {p['surface2']}; border: 1px solid {p['border']};
                border-radius: 8px; padding: 0px; }}
     QToolButton#cover:hover {{ border-color: {p['accent']}; }}
@@ -1201,7 +1214,15 @@ def _short_time(seconds):
 
 
 EDGE = 16
-APP_VERSION = "2.0.0"          # one inset for the title bar, the sidebar and the status bar
+
+CARD_QSS = ("QFrame#shotcard{background:%(surface)s;border-radius:8px;border:%(border)s;}"
+            "QFrame#shotcard:hover{background:%(surface2)s;}")
+
+MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(border)s;}"
+            "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
+            "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
+            "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
+APP_VERSION = "2.2.0"          # one inset for the title bar, the sidebar and the status bar
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -1865,7 +1886,1203 @@ class StatsPage(Page):
         self.refresh()
 
 
-class SettingsPage(Page):
+# ===================================================================== screenshots
+class ScreenshotSettingsMixin:
+    # ------------------------------------------------------------- tools tab
+    def _build_tools(self):
+        page, layout = self._page()
+        layout.addWidget(QLabel(tr("Target window")))
+        picker = QHBoxLayout()
+        self.tool_window = QComboBox()
+        self.tool_window.currentIndexChanged.connect(self._tool_window_changed)
+        picker.addWidget(self.tool_window, 1)
+        refresh = QPushButton(tr("Refresh"))
+        refresh.clicked.connect(self._tool_refresh)
+        picker.addWidget(refresh)
+        layout.addLayout(picker)
+        self.tool_target = QLabel("")
+        self.tool_target.setObjectName("sub")
+        self.tool_target.setWordWrap(True)
+        layout.addWidget(self.tool_target)
+
+        layout.addSpacing(10)
+        layout.addWidget(QLabel(tr("Resolution")))
+        self.tool_preset = QComboBox()
+        self.tool_preset.addItem(tr("Custom"), (0, 0))
+        for width, height in windowtool.PRESETS:
+            self.tool_preset.addItem("%d x %d" % (width, height), (width, height))
+        self.tool_preset.currentIndexChanged.connect(self._tool_preset_changed)
+        layout.addWidget(self.tool_preset)
+
+        size_row = QHBoxLayout()
+        self.tool_width = QSpinBox()
+        self.tool_width.setRange(320, 7680)
+        self.tool_width.setValue(1920)
+        self.tool_height = QSpinBox()
+        self.tool_height.setRange(240, 4320)
+        self.tool_height.setValue(1080)
+        size_row.addWidget(self.tool_width)
+        size_row.addWidget(QLabel("x"))
+        size_row.addWidget(self.tool_height)
+        size_row.addStretch(1)
+        apply_button = QPushButton(tr("Apply"))
+        apply_button.clicked.connect(self._tool_apply)
+        size_row.addWidget(apply_button)
+        layout.addLayout(size_row)
+
+        self.tool_status = QLabel("")
+        self.tool_status.setObjectName("sub")
+        self.tool_status.setWordWrap(True)
+        layout.addWidget(self.tool_status)
+        self._help(layout, tr("Pick the game window from the list (press "
+                             "Refresh if it is not there yet). Exclusive full "
+                             "screen games have to be switched to a window "
+                             "first; a game that enforces its own size may snap "
+                             "back immediately."))
+        layout.addStretch(1)
+        self._tool_refresh()
+        return page
+
+    def _tool_refresh(self):
+        """Fill the list with every window that can be resized."""
+        current = self.tool_window.currentData()
+        self.tool_window.blockSignals(True)
+        self.tool_window.clear()
+        windows = windowtool.list_windows()
+        for hwnd, title, width, height, name in windows:
+            label = "%s  (%dx%d%s)" % (title[:60], width, height,
+                                       ", " + name if name else "")
+            self.tool_window.addItem(label, (hwnd, width, height))
+        self.tool_window.blockSignals(False)
+        if not windows:
+            self.tool_target.setText(tr("No window found."))
+            self._tool_hwnd = 0
+            return
+        for index in range(self.tool_window.count()):
+            payload = self.tool_window.itemData(index)
+            if current and payload and payload[0] == current[0]:
+                self.tool_window.setCurrentIndex(index)
+                break
+        self._tool_window_changed(self.tool_window.currentIndex())
+
+    def _tool_window_changed(self, _index):
+        payload = self.tool_window.currentData()
+        if not payload:
+            self._tool_hwnd = 0
+            return
+        hwnd, width, height = payload
+        self._tool_hwnd = hwnd
+        self.tool_target.setText("%dx%d" % (width, height))
+        self.tool_width.setValue(max(320, min(7680, width)))
+        self.tool_height.setValue(max(240, min(4320, height)))
+
+    def _tool_preset_changed(self, _index):
+        payload = self.tool_preset.currentData()
+        if not payload or not payload[0]:
+            return
+        self.tool_width.setValue(payload[0])
+        self.tool_height.setValue(payload[1])
+
+    def _tool_apply(self):
+        hwnd = getattr(self, "_tool_hwnd", 0)
+        if not hwnd:
+            self._tool_refresh()
+            hwnd = getattr(self, "_tool_hwnd", 0)
+        if not hwnd:
+            self.tool_status.setText(tr("No window in the foreground."))
+            return
+        ok, message = windowtool.resize_client(hwnd, self.tool_width.value(),
+                                               self.tool_height.value())
+        self.tool_status.setText(message if ok else tr("Failed: %s") % message)
+        if ok:
+            self._tool_refresh()
+
+    def _build_screenshot(self):
+        page, layout = self._page()
+        opts = self.window.config.setdefault("screenshot", {})
+        layout.addWidget(QLabel(tr("Screenshot folder")))
+        row = QHBoxLayout()
+        self.shot_path = QLineEdit(opts.get("path") or default_pictures())
+        row.addWidget(self.shot_path, 1)
+        browse = QPushButton(tr("Browse…"))
+        browse.clicked.connect(self._pick_shot_folder)
+        row.addWidget(browse)
+        opener = QPushButton(tr("Open folder"))
+        opener.clicked.connect(self.window.open_screenshot_folder)
+        row.addWidget(opener)
+        layout.addLayout(row)
+        self._help(layout, tr("One folder per game, named after the title."))
+
+
+        layout.addWidget(QLabel(tr("Hotkey")))
+        line = QHBoxLayout()
+        line.addWidget(QLabel(tr("Capture the active window")))
+        line.addStretch(1)
+        self.shot_hotkey = QLineEdit(opts.get("hotkey") or "")
+        self.shot_hotkey.setReadOnly(True)
+        self.shot_hotkey.setPlaceholderText(tr("Not set"))
+        self.shot_hotkey.mousePressEvent = self._bind_hotkey_click
+        line.addWidget(self.shot_hotkey, 1)
+        clear = QPushButton(tr("Clear"))
+        clear.clicked.connect(self._clear_hotkey)
+        line.addWidget(clear)
+        layout.addLayout(line)
+        self._help(layout, tr("Click the field and press a key combination. "
+                              "Escape removes it."))
+
+        layout.addSpacing(12)
+        layout.addWidget(QLabel(tr("Sound")))
+        sound_row = QHBoxLayout()
+        self.shot_sound = QLineEdit(opts.get("sound") or "")
+        self.shot_sound.setReadOnly(True)
+        self.shot_sound.setPlaceholderText(tr("System default"))
+        sound_row.addWidget(self.shot_sound, 1)
+        pick = QPushButton(tr("Choose…"))
+        pick.clicked.connect(self._pick_sound)
+        sound_row.addWidget(pick)
+        test = QPushButton(tr("Test"))
+        test.clicked.connect(lambda: self.window.play_sound())
+        sound_row.addWidget(test)
+        clear_sound = QPushButton(tr("Clear"))
+        clear_sound.clicked.connect(self._clear_sound)
+        sound_row.addWidget(clear_sound)
+        layout.addLayout(sound_row)
+        self._help(layout, tr("WAV file played after each screenshot."))
+
+        layout.addSpacing(12)
+        self.shot_trim = QCheckBox(tr("Trim black bars left and right"))
+        self.shot_trim.setChecked(bool(opts.get("trim_bars", True)))
+        self.shot_trim.toggled.connect(self._trim_changed)
+        layout.addWidget(self.shot_trim)
+        self._help(layout, tr("Useful for upscalers that add bars to keep the "
+                              "original aspect ratio."))
+
+        self.shot_copy = QCheckBox(tr("Copy the screenshot to the clipboard"))
+        self.shot_copy.setChecked(bool(opts.get("copy_clipboard", False)))
+        self.shot_copy.toggled.connect(self._copy_changed)
+        layout.addWidget(self.shot_copy)
+        self._help(layout, tr("Paste straight into Discord or an image editor."))
+        layout.addStretch(1)
+        return page
+
+    def _trim_changed(self, enabled):
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["trim_bars"] = bool(enabled)
+        store.update_config_section("screenshot", {"trim_bars": bool(enabled)})
+
+    def _copy_changed(self, enabled):
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["copy_clipboard"] = bool(enabled)
+        store.update_config_section("screenshot", {"copy_clipboard": bool(enabled)})
+
+    def _pick_sound(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _f = QFileDialog.getOpenFileName(self, tr("Choose a sound"), "",
+                                               tr("Sound files (*.wav)"))
+        if path:
+            self.shot_sound.setText(path)
+            self.window.set_sound(path)
+
+    def _clear_sound(self):
+        self.shot_sound.setText("")
+        self.shot_sound.setPlaceholderText(tr("System default"))
+        self.window.set_sound("")
+
+    def _bind_hotkey_click(self, event):
+        self.window.start_hotkey_capture(self.shot_hotkey)
+        return QLineEdit.mousePressEvent(self.shot_hotkey, event)
+
+    def _clear_hotkey(self):
+        self.shot_hotkey.setText("")
+        self.shot_hotkey.setPlaceholderText(tr("Not set"))
+        self.window.set_hotkey("")
+
+    def _pick_shot_folder(self):
+        from PySide6.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(self, tr("Screenshot folder"),
+                                                  self.shot_path.text() or "")
+        if folder:
+            self.shot_path.setText(folder)
+            self.window.set_screenshot_folder(folder)
+
+
+def default_pictures():
+    """Pictures/HyggerPresence - the same folder the store uses."""
+    return str(shots.default_base_dir())
+
+
+class ShotSignals(QObject):
+    """Carries a finished capture back to the GUI thread."""
+
+    finished = Signal(object)
+
+
+class ScreenshotPage(Page):
+    """games -> folder -> one screenshot, all in the same page."""
+
+    COVER = (150, 200)
+    THUMB = (300, 170)
+
+    def __init__(self, window):
+        super().__init__(window)
+        from PySide6.QtWidgets import QScrollArea
+        self._view, self._folder, self._shot = "games", "", None
+        self._limit = 60
+        self._cards = {}
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 16)
+        outer.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.back_button = QPushButton(tr("Back"))
+        self.back_button.clicked.connect(self.go_back)
+        self.back_button.setVisible(False)
+        head.addWidget(self.back_button)
+        self.title_label = QLabel(tr("Screenshots"))
+        self.title_label.setObjectName("h1")
+        head.addWidget(self.title_label)
+        self.count_label = QLabel("")
+        self.count_label.setObjectName("sub")
+        head.addWidget(self.count_label)
+        head.addStretch(1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(tr("Search title…"))
+        self.search.textChanged.connect(self._fill)
+        self.search.setFixedWidth(220)
+        head.addWidget(self.search)
+        self.open_folder_button = QPushButton(tr("Open folder"))
+        self.open_folder_button.setFixedWidth(120)
+        self.open_folder_button.clicked.connect(self._open_current_folder)
+        head.addWidget(self.open_folder_button)
+        outer.addLayout(head)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scroll, 1)
+
+        # single screenshot view
+        self.single = QWidget()
+        single_lay = QVBoxLayout(self.single)
+        single_lay.setContentsMargins(0, 0, 0, 0)
+        single_lay.setSpacing(10)
+        self.shot_image = QLabel()
+        self.shot_image.setAlignment(Qt.AlignCenter)
+        single_lay.addWidget(self.shot_image, 1)
+        self.shot_info = QLabel("")
+        self.shot_info.setObjectName("sub")
+        single_lay.addWidget(self.shot_info)
+        row = QHBoxLayout()
+        copy = QPushButton(tr("Copy"))
+        copy.clicked.connect(self._copy_shot)
+        row.addWidget(copy)
+        open_it = QPushButton(tr("Open"))
+        open_it.clicked.connect(self._open_shot)
+        row.addWidget(open_it)
+        reveal = QPushButton(tr("Show in folder"))
+        reveal.clicked.connect(self._reveal_shot)
+        row.addWidget(reveal)
+        delete = QPushButton(tr("Delete"))
+        delete.setObjectName("danger")
+        delete.setStyleSheet("QPushButton{background:#b0392f;color:#ffffff;}"
+                             "QPushButton:hover{background:#c9483c;}")
+        delete.clicked.connect(self._delete_shot)
+        row.addWidget(delete)
+        row.addStretch(1)
+        single_lay.addLayout(row)
+        self.single.setVisible(False)
+        outer.addWidget(self.single, 1)
+
+        self.empty = QLabel(tr("No screenshots"))
+        self.empty.setObjectName("sub")
+        self.empty.setAlignment(Qt.AlignCenter)
+        outer.addWidget(self.empty)
+
+        # Escape must work even when the focus sits on a nav button
+        from PySide6.QtWidgets import QApplication
+
+        page = self
+
+        class _Escape(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() != QEvent.KeyPress or not page.isVisible():
+                    return False
+                if event.key() == Qt.Key_Escape:
+                    if page._view == "games":
+                        return False
+                    page.go_back()
+                    return True
+                if event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+                    page.select_all()
+                    return True
+                if event.key() == Qt.Key_Delete:
+                    page.delete_selection()
+                    return True
+                if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+                    page.copy_selection()
+                    return True
+                return False
+
+        self._escape_filter = _Escape(self)
+        QApplication.instance().installEventFilter(self._escape_filter)
+
+        self._selection = set()
+        self._rubber = None
+        self._rubber_origin = None
+        from PySide6.QtCore import QFileSystemWatcher
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_files_changed)
+        self._watcher.directoryChanged.connect(self._on_files_changed)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(800)
+        self._refresh_timer.timeout.connect(self._fill)
+
+        self._thumb_jobs = []
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(8)
+        self._thumb_timer.timeout.connect(self._load_next_thumbs)
+
+        self.refresh()
+
+    # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _thumb_cache_dir():
+        root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
+        return Path(root) / "HyggerPresence" / "thumbs"
+
+    def _cached_thumb(self, path, size):
+        """Thumbnails are cached on disk, like Explorer does."""
+        import hashlib
+        try:
+            stat = path.stat()
+        except OSError:
+            return QPixmap()
+        key = hashlib.md5(("%s|%d|%d|%dx%d" % (path, stat.st_mtime_ns, stat.st_size,
+                                               size[0], size[1])).encode()).hexdigest()
+        cache = self._thumb_cache_dir() / ("%s.png" % key)
+        if cache.exists():
+            pixmap = QPixmap(str(cache))
+            if not pixmap.isNull():
+                return pixmap
+        pixmap = self._fast_pixmap(path, size)
+        if not pixmap.isNull():
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                pixmap.save(str(cache), "PNG")
+            except Exception:
+                pass
+        return pixmap
+
+    def _load_next_thumbs(self):
+        """Fill placeholders a few at a time so the page never freezes."""
+        if not self._thumb_jobs:
+            self._thumb_timer.stop()
+            return
+        for _ in range(6):
+            if not self._thumb_jobs:
+                self._thumb_timer.stop()
+                return
+            label, path = self._thumb_jobs.pop(0)
+            try:
+                pixmap = self._cached_thumb(path, self.THUMB)
+                if not pixmap.isNull() and label is not None:
+                    label.setPixmap(pixmap)
+            except RuntimeError:
+                pass
+
+    def _on_files_changed(self, *_args):
+        self._watch_paths()
+        if not self.isVisible() or getattr(self, "_capturing", False):
+            self._dirty = True          # refresh when the page is shown again
+            return
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    def _watch_paths(self):
+        """Watch the root and every game folder, so counts refresh live."""
+        wanted = []
+        store_ = self._shot_store()
+        try:
+            root = store_.root
+            if root.exists():
+                wanted.append(str(root))
+                for index, sub in enumerate(sorted(root.iterdir())):
+                    if index >= 40:
+                        break
+                    if sub.is_dir():
+                        wanted.append(str(sub))
+        except Exception:
+            pass
+        for path in self._watcher.directories():
+            if path not in wanted:
+                self._watcher.removePath(path)
+        for path in wanted:
+            if path not in self._watcher.directories():
+                self._watcher.addPath(path)
+
+    def _shot_store(self):
+        return getattr(self.window, "shot_store", None) or shots.ScreenshotStore()
+
+    @staticmethod
+    def _as_pixmap(cover):
+        if cover is None:
+            return None
+        if isinstance(cover, QPixmap):
+            return cover if not cover.isNull() else None
+        if isinstance(cover, QImage):
+            return QPixmap.fromImage(cover)
+        try:
+            return QPixmap(cover)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fast_pixmap(path, size):
+        """Decode straight to the thumbnail size: much faster for big PNGs."""
+        from PySide6.QtGui import QImageReader
+        reader = QImageReader(str(path))
+        reader.setAutoTransform(True)
+        source = reader.size()
+        if source.isValid():
+            scaled = source.scaled(QSize(size[0], size[1]), Qt.KeepAspectRatio)
+            reader.setScaledSize(scaled)
+        image = reader.read()
+        return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+
+    def _search_blob(self, folder):
+        parts = [folder]
+        for game in getattr(self.window.app, "games", []) or []:
+            if shots.sanitise(game.get("original") or game.get("title") or "") != folder:
+                continue
+            parts.extend(str(game.get(key, "")) for key in
+                         ("original", "title", "romanized", "developer", "year",
+                          "vndb_id", "exe"))
+            break
+        return " ".join(parts).lower()
+
+    def _title_mode(self):
+        return (self.window.config.get("library_title_mode") or "original")
+
+    def _library_title(self, folder):
+        romanise = self._title_mode() == "romanized"
+        for game in getattr(self.window.app, "games", []) or []:
+            original = game.get("original") or game.get("title") or ""
+            if shots.sanitise(original) != folder:
+                continue
+            return (game.get("title") or original) if romanise else (original or folder)
+        return folder
+
+    def _cover_for(self, folder):
+        for game in getattr(self.window.app, "games", []) or []:
+            if shots.sanitise(game.get("original") or game.get("title") or "") != folder:
+                continue
+            url = game.get("image") or ""
+            cached = self.window.app.cover_cache.get(url) if url else None
+            if cached is not None:
+                return self._as_pixmap(cached)
+            if url:
+                self.window.request_cover(url, lambda _u, _i: self._fill())
+            return None
+        return None
+
+    def _columns(self, width, size):
+        return max(1, width // (size[0] + 34))
+
+    # -------------------------------------------------------------------- views
+    def show_games(self):
+        self._view, self._folder, self._shot = "games", "", None
+        self._fill()
+
+    def open_folder(self, folder):
+        self._view, self._folder, self._shot = "folder", folder, None
+        self._limit = 60
+        self._fill()
+
+    def open_shot(self, path):
+        self._view, self._shot = "shot", Path(path)
+        self._fill()
+
+    def go_back(self):
+        """Escape / Back: one level up."""
+        if self._view == "shot":
+            self.open_folder(self._folder)
+        elif self._view == "folder":
+            self.show_games()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.go_back()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    # ---------------------------------------------------------------- selection
+    def _card_pressed(self, event, path):
+        from PySide6.QtWidgets import QApplication
+        if event.button() == Qt.RightButton:
+            if str(path) not in self._selection:
+                self._selection = {str(path)}
+                self._paint_selection()
+            self._show_menu(position=event.globalPosition().toPoint())
+            return
+        if event.button() != Qt.LeftButton:
+            return
+        key = str(path)
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            if key in self._selection:
+                self._selection.discard(key)
+            else:
+                self._selection.add(key)
+        else:
+            self._selection = {key}
+        self._paint_selection()
+
+    def _game_pressed(self, event, folder):
+        if event.button() == Qt.RightButton:
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self)
+            menu.setStyleSheet(MENU_QSS % self.window.palette)
+            action = menu.addAction(tr("Open folder"))
+            if menu.exec(event.globalPosition().toPoint()) is action:
+                shots.open_folder(self._shot_store().folder_for(folder))
+            return
+        if event.button() != Qt.LeftButton:
+            return
+        from PySide6.QtWidgets import QApplication
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            if folder in self._selection:
+                self._selection.discard(folder)
+            else:
+                self._selection.add(folder)
+        else:
+            self._selection = {folder}
+        self._paint_selection()
+
+    def _paint_selection(self):
+        """Restyle only the cards whose selected state changed."""
+        accent = self.window.palette.get("accent", "#5b8def")
+        painted = getattr(self, "_painted_selection", set())
+        changed = painted.symmetric_difference(self._selection)
+        if not changed:
+            return
+        for key in changed:
+            card = self._cards.get(key)
+            if card is None or not hasattr(card, "setStyleSheet"):
+                continue
+            border = (("2px solid %s" % accent) if key in self._selection
+                      else "2px solid transparent")
+            card.setStyleSheet(CARD_QSS % dict(self.window.palette, border=border))
+        self._painted_selection = set(self._selection)
+
+    def _apply_selection_style(self):
+        style = self.styleSheet()
+        if "card[selected=\"true\"]" in style:
+            return
+        self.setStyleSheet(style + """
+QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
+""")
+
+    def select_all(self):
+        if self._view != "folder":
+            return
+        self._selection = set(self._cards.keys())
+        self._paint_selection()
+
+    def _show_menu(self, event=None, position=None):
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QCursor
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_QSS % self.window.palette)
+        count = len(self._selection)
+        single = count == 1
+        copy = menu.addAction(tr("Copy"))
+        copy.setEnabled(count >= 1)
+        open_action = menu.addAction(tr("Open"))
+        open_action.setEnabled(single)
+        reveal = menu.addAction(tr("Show in folder"))
+        reveal.setEnabled(single)
+        menu.addSeparator()
+        delete = menu.addAction(tr("Delete") + (" (%d)" % count if count else ""))
+        delete.setEnabled(count >= 1)
+        where = position or (event.globalPosition().toPoint() if event is not None
+                             else QCursor.pos())
+        action = menu.exec(where)
+        if action is None:
+            return
+        if action is delete:
+            self.delete_selection()
+        elif action is copy:
+            self.copy_selection()
+        elif single:
+            path = Path(next(iter(self._selection)))
+            if action is open_action:
+                self._shot = path
+                self._open_shot()
+            elif action is reveal:
+                shots.reveal_in_explorer(path)
+
+    def copy_selection(self):
+        """Copy the selected images; more than one goes to the clipboard as files."""
+        paths = [Path(p) for p in self._selection if Path(p).exists()]
+        if not paths:
+            return
+        from PySide6.QtCore import QMimeData, QUrl
+        from PySide6.QtWidgets import QApplication
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+        if len(paths) == 1:
+            image = QImage(str(paths[0]))
+            if not image.isNull():
+                mime.setImageData(image)
+        QApplication.clipboard().setMimeData(mime)
+
+    def contextMenuEvent(self, event):
+        if self._view == "folder":
+            self._show_menu(position=event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
+    def delete_selection(self):
+        paths = [Path(p) for p in self._selection if Path(p).exists()]
+        if not paths:
+            return
+        if len(paths) > 1:
+            from PySide6.QtWidgets import QMessageBox
+            answer = QMessageBox.question(
+                self, tr("Delete screenshots"),
+                tr("Delete %d screenshots?") % len(paths))
+            if answer != QMessageBox.Yes:
+                return
+        for path in paths:
+            shots.ScreenshotStore.delete(path)
+        self._selection = set()
+        self._fill()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.go_back()
+            event.accept()
+            return
+        if event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.select_all()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Delete:
+            self.delete_selection()
+            event.accept()
+            return
+        if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            self.copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._view == "folder" and event.button() == Qt.LeftButton:
+            self._rubber_origin = event.position().toPoint()
+            self._selection = set()
+            self._paint_selection()
+
+    def mouseMoveEvent(self, event):
+        if self._rubber_origin is None:
+            return
+        from PySide6.QtWidgets import QRubberBand
+        if self._rubber is None:
+            self._rubber = QRubberBand(QRubberBand.Rectangle, self)
+        rect = QRect(self._rubber_origin, event.position().toPoint()).normalized()
+        self._rubber.setGeometry(rect)
+        self._rubber.show()
+        for key, card in self._cards.items():
+            if not hasattr(card, "geometry"):
+                continue
+            area = QRect(card.mapTo(self, QPoint(0, 0)), card.size())
+            if rect.intersects(area):
+                self._selection.add(key)
+        self._paint_selection()
+
+    def mouseReleaseEvent(self, event):
+        if self._rubber is not None:
+            self._rubber.hide()
+        self._rubber_origin = None
+
+    def _load_more(self):
+        self._limit += 120
+        self._fill()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_dirty", False):
+            self._dirty = False
+            QTimer.singleShot(0, self._fill)
+
+    def refresh(self):
+        self._fill()
+
+    # --------------------------------------------------------------------- fill
+    def _fill(self):
+        import time as _t3
+        _fill_started = _t3.time()
+        store_ = self._shot_store()
+        is_shot = self._view == "shot"
+        self.back_button.setVisible(self._view != "games")
+        self.search.setVisible(self._view == "games")
+        self.scroll.setVisible(not is_shot)
+        self.single.setVisible(is_shot)
+        self.empty.setVisible(False)
+
+        if is_shot:
+            self._fill_single()
+            return
+
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setSpacing(14)
+        grid.setContentsMargins(0, 0, 0, 0)
+        self._cards = {}
+        width = max(360, self.width() - 60)
+
+        if self._view == "games":
+            self.title_label.setText(tr("Screenshots"))
+            games = store_.games_with_shots()
+            needle = (self.search.text() or "").strip().lower()
+            if needle:
+                games = [g for g in games if needle in self._search_blob(g[0])]
+            self.count_label.setText(tr("%d screenshot(s)") % sum(c for _f, c in games))
+            columns = self._columns(width, self.COVER)
+            for index, (folder, count) in enumerate(games):
+                card = self._game_card(folder, count)
+                grid.addWidget(card, index // columns, index % columns)
+                self._cards[folder] = card
+            self.empty.setText(tr("No screenshots"))
+            self.empty.setVisible(not games)
+            grid.setRowStretch(len(games) // columns + 1, 1)
+        else:
+            self.title_label.setText(self._library_title(self._folder))
+            paths = store_.shots_for(self._folder)
+            self.count_label.setText(tr("%d screenshot(s)") % len(paths))
+            columns = self._columns(width, self.THUMB)
+            self._thumb_jobs = []
+            shown = paths[:self._limit]
+            for index, path in enumerate(shown):
+                card, art = self._shot_card(path, deferred=True)
+                grid.addWidget(card, index // columns, index % columns)
+                self._cards[str(path)] = card
+                self._thumb_jobs.append((art, path))
+            if len(paths) > self._limit:
+                more = QPushButton(tr("Load more (%d left)") % (len(paths) - self._limit))
+                more.clicked.connect(self._load_more)
+                grid.addWidget(more, len(shown) // columns + 1, 0, 1, min(columns, 4))
+            if self._thumb_jobs:
+                self._thumb_timer.start()
+            else:
+                self._thumb_timer.stop()
+            self.empty.setText(tr("No screenshots"))
+            self.empty.setVisible(not paths)
+            grid.setRowStretch(len(shown) // columns + 2, 1)
+
+        self.scroll.setWidget(host)
+        self._watch_paths()
+        try:
+            from .core import debug_log
+            debug_log("gallery %s rebuilt in %.0f ms (%d cards)"
+                      % (self._view, (_t3.time() - _fill_started) * 1000.0,
+                         len(self._cards)))
+        except Exception:
+            pass
+
+    def _fill_single(self):
+        path = self._shot
+        self.title_label.setText(path.name if path else "")
+        self.count_label.setText("")
+        if path is None or not path.exists():
+            self.empty.setVisible(True)
+            self.single.setVisible(False)
+            return
+        from PySide6.QtGui import QImageReader
+        reader = QImageReader(str(path))
+        size = reader.size()
+        width = max(320, self.width() - 80)
+        height = max(200, self.height() - 220)
+        scaled = self._fast_pixmap(path, (width, height))
+        self.shot_image.setPixmap(scaled)
+        self.shot_info.setText("%s   \u2022   %d x %d   \u2022   %s"
+                               % (path.name, size.width(), size.height(),
+                                  time.strftime("%Y-%m-%d %H:%M",
+                                                time.localtime(path.stat().st_mtime))))
+
+    # -------------------------------------------------------------------- cards
+    def _game_card(self, folder, count):
+        card = QFrame()
+        card.setObjectName("shotcard")
+        card.setCursor(Qt.PointingHandCursor)
+        card.setFixedWidth(self.COVER[0] + 30)
+        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="2px solid transparent"))
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(6)
+        art = QLabel()
+        art.setFixedSize(*self.COVER)
+        art.setAlignment(Qt.AlignCenter)
+        art.setStyleSheet("QLabel{background:%s;border-radius:4px;}"
+                          % self.window.palette["surface2"])
+        cover = self._cover_for(folder)
+        if cover is not None:
+            art.setPixmap(cover.scaled(self.COVER[0], self.COVER[1], Qt.KeepAspectRatio,
+                                       Qt.SmoothTransformation))
+        lay.addWidget(art, 0, Qt.AlignHCenter)
+        name = QLabel(self._library_title(folder))
+        name.setObjectName("h3")
+        name.setWordWrap(True)
+        name.setFixedHeight(48)
+        lay.addWidget(name)
+        sub = QLabel(tr("%d Screenshot(s)") % count)
+        sub.setObjectName("sub")
+        lay.addWidget(sub)
+        card.mouseDoubleClickEvent = lambda _e, f=folder: self.open_folder(f)
+        card.mousePressEvent = lambda e, f=folder: self._game_pressed(e, f)
+        card.setProperty("selected", "false")
+        return card
+
+    def _shot_card(self, path, deferred=False):
+        card = QFrame()
+        card.setObjectName("shotcard")
+        card.setCursor(Qt.PointingHandCursor)
+        card.setFixedWidth(self.THUMB[0] + 16)
+        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="2px solid transparent"))
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(4)
+        art = QLabel()
+        art.setFixedSize(*self.THUMB)
+        art.setAlignment(Qt.AlignCenter)
+        art.setStyleSheet("QLabel{background:%s;border-radius:4px;}"
+                          % self.window.palette["surface2"])
+        if deferred:
+            pass                      # _fill() queues the job after adding the card
+        else:
+            pixmap = self._cached_thumb(path, self.THUMB)
+            if not pixmap.isNull():
+                art.setPixmap(pixmap)
+        lay.addWidget(art, 0, Qt.AlignHCenter)
+        name = QLabel(path.name)
+        name.setObjectName("sub")
+        name.setWordWrap(True)
+        lay.addWidget(name)
+        card.mouseDoubleClickEvent = lambda _e, p=path: self.open_shot(p)
+        card.mousePressEvent = lambda e, p=path: self._card_pressed(e, p)
+        card.setProperty("selected", "false")
+        return card, art
+
+    # ------------------------------------------------------------------ actions
+    def _open_current_folder(self):
+        store_ = self._shot_store()
+        if self._view == "folder" and self._folder:
+            shots.open_folder(store_.folder_for(self._folder))
+        else:
+            try:
+                store_.root.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            shots.open_folder(store_.root)
+
+    def _copy_shot(self):
+        if self._shot and self._shot.exists():
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setPixmap(QPixmap(str(self._shot)))
+
+    def _open_shot(self):
+        """Open in the program associated with PNG; explorer covers odd setups."""
+        if not (self._shot and self._shot.exists()):
+            return
+        target = str(self._shot)
+        try:
+            os.startfile(target)
+            return
+        except Exception:
+            pass
+        try:
+            import subprocess
+            subprocess.Popen(["explorer", target])
+            return
+        except Exception:
+            pass
+        try:
+            import subprocess
+            subprocess.Popen(["rundll32", "shell32.dll,ShellExec_RunDLL", target])
+        except Exception:
+            pass
+
+    def _reveal_shot(self):
+        if self._shot and self._shot.exists():
+            shots.reveal_in_explorer(self._shot)
+
+    def _delete_shot(self):
+        if not self._shot:
+            return
+        shots.ScreenshotStore.delete(self._shot)
+        self.open_folder(self._folder)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not getattr(self, "_resize_timer", None):
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._fill)
+        self._resize_timer.start(150)
+
+
+class ScreenshotMixin:
+    def set_screenshot_folder(self, folder):
+        opts = self.config.setdefault("screenshot", {})
+        opts["path"] = folder or ""
+        self.shot_store = shots.ScreenshotStore(folder or None)
+        store.update_config_section("screenshot", {"path": folder or ""})
+        if hasattr(self, "shots_page"):
+            self.shots_page.refresh()
+
+    def open_screenshot_folder(self):
+        """Reveal Pictures\\HyggerPresence in Explorer."""
+        store_ = getattr(self, "shot_store", None)
+        folder = store_.root if store_ is not None else None
+        if folder is None:
+            from .screenshot import default_base_dir
+            folder = default_base_dir()
+        try:
+            Path(folder).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        shots.open_folder(folder)
+
+    def current_game_title(self):
+        game = self.engine.game or {}
+        return (game.get("original") or game.get("title") or "").strip()
+
+    def game_in_foreground(self):
+        """True when the detected game owns the foreground window."""
+        try:
+            from .winapi import get_foreground_pid
+            pid = get_foreground_pid()
+        except Exception:
+            return False
+        if not pid:
+            return False
+        game = self.engine.game
+        if not game:
+            return False
+        try:
+            tracked = set(self.engine.pids_for_game(game) or ())
+        except Exception:
+            tracked = set()
+        if pid in tracked:
+            return True
+        try:
+            from .winapi import get_ancestor_pids
+            return bool(tracked & set(get_ancestor_pids(pid) or ()))
+        except Exception:
+            return False
+
+    def take_screenshot(self):
+        if not hasattr(self, "shot_store"):
+            return
+        import time as _t
+        now = _t.time()
+        if now - getattr(self, "_last_capture_at", 0.0) < 0.4:
+            debug_log("capture ignored: %.2fs after the previous one"
+                      % (now - getattr(self, "_last_capture_at", 0.0)))
+            return
+        self._last_capture_at = now
+        capture_opts = (self.config.get("screenshot") or {})
+        if not self.game_in_foreground():
+            return
+
+        # No delay: the window does not move away, and a delayed grab used to
+        # capture whatever had the focus by then.
+        self._capturing = True
+        opts = (self.config.get("screenshot") or {})
+        import time as _t
+        _started = _t.time()
+        pixmap = shots.capture_window()
+        if pixmap is None:
+            self._capturing = False
+        else:
+            try:
+                debug_log("capture %dx%d in %.0f ms"
+                          % (pixmap.width(), pixmap.height(),
+                             (_t.time() - _started) * 1000.0))
+            except Exception:
+                pass
+        if pixmap is None:
+            return
+        self._deliver_capture(pixmap, opts)
+
+    def _deliver_capture(self, pixmap, opts):
+        try:
+            debug_log("capture %dx%d mode=%s -> folder %r"
+                      % (pixmap.width(), pixmap.height(),
+                         opts.get("mode") or "window",
+                         self.current_game_title() or shots.FOLDER_FALLBACK))
+        except Exception:
+            pass
+        if opts.get("trim_bars", True):
+            trimmed = shots.trim_bars(pixmap)
+            if trimmed is not pixmap:
+                pixmap = trimmed
+        shots.beep(opts.get("sound") or "")
+        title = self.current_game_title() or shots.FOLDER_FALLBACK
+        store_ = self.shot_store
+        copy_after = bool(opts.get("copy_clipboard"))
+
+        def save_in_background():
+            try:
+                store_.save(pixmap, title)
+            except Exception:
+                return
+            self._capturing = False
+            self.shot_signals.finished.emit(pixmap if copy_after else None)
+
+        threading.Thread(target=save_in_background, daemon=True).start()
+
+    def _on_shot_saved(self, pixmap):
+        """GUI thread: clipboard copy plus the deferred gallery refresh."""
+        if pixmap is not None:
+            self._copy_to_clipboard(pixmap)
+        self._after_screenshot()
+
+    def _copy_to_clipboard(self, pixmap):
+        from PySide6.QtWidgets import QApplication
+        try:
+            QApplication.clipboard().setPixmap(pixmap)
+        except Exception:
+            pass
+
+    def _after_screenshot(self):
+        """Rebuild once, 1.5 s after the last shot, instead of after every one."""
+        page = getattr(self, "shots_page", None)
+        if page is None:
+            return
+        page._dirty = True
+        timer = getattr(self, "_shot_refresh_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(1500)
+            timer.timeout.connect(self._flush_shot_refresh)
+            self._shot_refresh_timer = timer
+        timer.start()
+
+    def _flush_shot_refresh(self):
+        page = getattr(self, "shots_page", None)
+        if page is None or not page._dirty:
+            return
+        page._dirty = False
+        if page.isVisible():
+            page._fill()
+
+    def _push_shot_count(self):
+        return 0
+
+    def _on_hotkey(self, _name):
+        self.take_screenshot()
+
+    def set_sound(self, path):
+        opts = self.config.setdefault("screenshot", {})
+        opts["sound"] = path or ""
+        store.update_config_section("screenshot", {"sound": path or ""})
+
+    def play_sound(self):
+        shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
+
+    def set_hotkey(self, spec):
+        opts = self.config.setdefault("screenshot", {})
+        opts["hotkey"] = spec
+        store.update_config_section("screenshot", {"hotkey": spec})
+        self._register_hotkey()
+
+    def _register_hotkey(self):
+        manager = getattr(self, "hotkeys", None)
+        if manager is None:
+            return
+        spec = ((self.config.get("screenshot") or {}).get("hotkey") or "").strip()
+        parsed = hotkey_mod.parse(spec) if spec else None
+        if not parsed:
+            manager.release()
+            self._hotkey_timer.stop()
+            return
+        if not manager.is_bound():
+            manager.release()
+            registered = manager.bind("window", parsed[0], parsed[1])
+        else:
+            registered = True
+        if registered:
+            # Windows delivers WM_HOTKEY, the 50 ms poll would fire as well
+            self._hotkey_timer.stop()
+        elif not self._hotkey_timer.isActive():
+            self._hotkey_timer.start()
+
+    def _poll_hotkey(self):
+        spec = ((self.config.get("screenshot") or {}).get("hotkey") or "").strip()
+        parsed = hotkey_mod.parse(spec) if spec else None
+        if not parsed:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            modifiers, key = parsed
+            need = []
+            if modifiers & 0x0002:
+                need.append(0x11)
+            if modifiers & 0x0001:
+                need.append(0x12)
+            if modifiers & 0x0004:
+                need.append(0x10)
+            if modifiers & 0x0008:
+                need.append(0x5B)
+            down = bool(user32.GetAsyncKeyState(key) & 0x8000)
+            mods_ok = all(user32.GetAsyncKeyState(vk) & 0x8000 for vk in need) if need else True
+        except Exception:
+            return
+        pressed = down and mods_ok
+        if pressed and not self._hotkey_state:
+            self.take_screenshot()
+        self._hotkey_state = pressed
+
+    def start_hotkey_capture(self, field):
+        from PySide6.QtWidgets import QApplication
+
+        class _Grabber(QObject):
+            def __init__(self, window, target):
+                super().__init__(window)
+                self.window, self.target = window, target
+
+            def eventFilter(self, obj, event):
+                if event.type() != QEvent.KeyPress:
+                    return False
+                if event.key() == Qt.Key_Escape:
+                    self.target.setText("")
+                    self.target.setPlaceholderText(tr("Not set"))
+                    self.window.set_hotkey("")
+                    QApplication.instance().removeEventFilter(self)
+                    return True
+                parsed = from_qt(event.key(), event.modifiers())
+                if not parsed:
+                    # keep listening: a bare modifier must not end the capture
+                    return True
+                text = describe(parsed[0], parsed[1])
+                self.target.setText(text)
+                self.window.set_hotkey(text)
+                QApplication.instance().removeEventFilter(self)
+                return True
+
+        grabber = _Grabber(self, field)
+        QApplication.instance().installEventFilter(grabber)
+        self._hotkey_grabber = grabber
+
+
+class SettingsPage(ScreenshotSettingsMixin, Page):
     """Settings with the 1.0.4 shape: General / Presence (4 sub tabs) / Launchers /
     Updates. Every field has the explanation *under* it as small grey text, and each
     group has its own "Reset to default"."""
@@ -1917,6 +3134,57 @@ class SettingsPage(Page):
 
     def _build_variables(self):
         page, layout = self._page()
+        self._variable_pills = {}
+        self._variable_texts = {}
+        for token, description in self.VARIABLES:
+            translated = tr(description)
+            parts = translated.split("\u2013", 1)
+            explanation = parts[1].strip() if len(parts) > 1 else translated
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            pill = QLabel(token)
+            pill.setCursor(Qt.PointingHandCursor)
+            pill.setToolTip(tr("Click to copy"))
+            pill.setObjectName("pill")
+            badge = QLabel("\u2713")
+            badge.setObjectName("tick")
+            badge.setFixedWidth(14)
+            badge.setStyleSheet("QLabel{color:#22c55e;font-weight:700;}"
+                                "QLabel{background:transparent;}")
+            badge.hide()
+            pill._badge = badge
+            pill.mousePressEvent = lambda _e, tk=token, pl=pill: self._copy_token(tk, pl)
+            line.addWidget(pill)
+            line.addWidget(badge)
+            text = QLabel(explanation)
+            text.setWordWrap(True)
+            line.addWidget(text, 1)
+            layout.addWidget(row)
+            self._variable_pills[token] = pill
+            self._variable_texts.setdefault("_", [])
+            self._variable_texts["_"].append((text, description))
+        layout.addStretch(1)
+        return page
+
+    def _copy_token(self, token, pill=None):
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(token)
+        if pill is not None:
+            badge = getattr(pill, "_badge", None)
+            if badge is not None:
+                badge.show()
+                QTimer.singleShot(900, badge.hide)
+
+    def refresh_variables(self):
+        for label, description in getattr(self, "_variable_texts", {}).get("_", []):
+            translated = tr(description)
+            parts = translated.split("\u2013", 1)
+            label.setText(parts[1].strip() if len(parts) > 1 else translated)
+        if not hasattr(self, "_variables_label"):
+            return
+        from PySide6.QtWidgets import QApplication
         theme = self.window.palette
         rows = []
         for token, description in self.VARIABLES:
@@ -1925,18 +3193,13 @@ class SettingsPage(Page):
             explanation = parts[1].strip() if len(parts) > 1 else translated
             rows.append(
                 '<div style="margin-bottom:7px;">'
-                '<span style="font-family:Consolas,\'Courier New\',monospace;'
-                ' background:%s; padding:2px 6px; border-radius:4px; color:%s;">'
-                '%s</span>&nbsp;&nbsp;<span style="color:%s;">%s</span></div>'
-                % (theme["surface2"], theme["text"], token,
+                '<a href="%s" style="font-family:Consolas,\'Courier New\',monospace;'
+                ' background:%s; padding:2px 6px; border-radius:4px; color:%s;'
+                ' text-decoration:none;">%s</a>&nbsp;&nbsp;'
+                '<span style="color:%s;">%s</span></div>'
+                % (token, theme["surface2"], theme["text"], token,
                    theme["subtext"], explanation))
-        label = QLabel("".join(rows))
-        label.setTextFormat(Qt.RichText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(label)
-        layout.addStretch(1)
-        return page
+        self._variables_label.setText("".join(rows))
 
     @staticmethod
     def _help(parent, text):
@@ -2029,8 +3292,9 @@ class SettingsPage(Page):
         self.data_label.setObjectName("help")
         layout.addWidget(self.data_label)
         self._refresh_data_label()
-        self._help(layout, "games.json, config.json and stats.db live next to main.py. "
-                           "Put your old files there and press Reload.")
+        self._help(layout, tr("games.json, config.json and stats.db live in "
+                              "%APPDATA%\\HyggerPresence. Put your old files there "
+                              "and press Reload."))
         data_row = QHBoxLayout()
         reload_button = QPushButton("Reload data")
         reload_button.clicked.connect(self._reload_data)
@@ -2061,6 +3325,8 @@ class SettingsPage(Page):
             pass
         # re-translate the live window: no restart needed
         i18n.apply_language(code, root=self.window)
+        if hasattr(self, "refresh_variables"):
+            self.refresh_variables()
         self._retranslate_tabs()
 
     def _title_mode_changed(self, index):
@@ -2074,7 +3340,8 @@ class SettingsPage(Page):
 
     def _retranslate_tabs(self):
         for tabs, captions in ((getattr(self, "tabs", None),
-                                ("General", "Presence", "Launchers", "Updates")),
+                                ("General", "Presence", "Launchers", "Updates",
+                                 "Screenshots", "Tools")),
                                (getattr(self, "presence_tabs", None),
                                 ("Reading", "Paused", "Idle", "Advanced"))):
             if tabs is None:
@@ -2379,12 +3646,18 @@ class SettingsPage(Page):
                            "config.json and stats.db are kept.")
         layout.addStretch(1)
         self.tabs.addTab(page, tr("Updates"))
+        self.tabs.addTab(self._build_screenshot(), tr("Screenshots"))
+        self.tabs.addTab(self._build_tools(), tr("Tools"))
         self._refresh_skip_label()
 
     # ------------------------------------------------------------ data actions
     def _reload_data(self):
         window = self.window
-        window.config = store.load_config()
+        fresh = store.load_config()
+        # update in place: window.config and app.config must stay the same object
+        window.config.clear()
+        window.config.update(fresh)
+        window.app.config = window.config
         window.engine.games = store.load_games()
         window.engine.client_id = window.config.get("client_id", "")
         window.engine.templates = window.config.get("templates") or DEFAULT_TEMPLATES
@@ -2419,10 +3692,10 @@ class SettingsPage(Page):
         summary = store.data_summary()
         answer = QMessageBox.question(
             self, tr("Import 1.x data"),
-            "Nothing was copied from the folder above.\n\n"
-            "This folder already has %d game(s) and %d session(s), so it is probably "
-            "already imported - press \u201cReload data\u201d if you just replaced the files.\n\n"
-            "Pick the files manually instead?" % (summary["games"], summary["sessions"]))
+            tr("Nothing was copied from the folder above.\n\n"
+               "This folder already has %d game(s) and %d session(s), so it is probably "
+               "already imported - press \u201cReload data\u201d if you just replaced the files.\n\n"
+               "Pick the files manually instead?") % (summary["games"], summary["sessions"]))
         if answer == QMessageBox.Yes:
             self._choose_import_files()
 
@@ -3474,7 +4747,7 @@ class CoverPickerDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- window
-class MainWindow(QMainWindow):
+class MainWindow(ScreenshotMixin, QMainWindow):
     def __init__(self, app):
         super().__init__()
         self.app = app
@@ -3532,7 +4805,8 @@ class MainWindow(QMainWindow):
         side_column.setSpacing(4)
         self.nav_buttons = []
         for index, label in enumerate((tr("Library"), tr("Detection"),
-                                       tr("Statistics"), tr("Settings"))):
+                                       tr("Statistics"), tr("Screenshots"),
+                                       tr("Settings"))):
             button = QPushButton(label)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -3560,9 +4834,10 @@ class MainWindow(QMainWindow):
         self.library_page = LibraryPage(self)
         self.now_page = NowPage(self)
         self.stats_page = StatsPage(self)
+        self.shots_page = ScreenshotPage(self)
         self.settings_page = SettingsPage(self)
         for page in (self.library_page, self.now_page, self.stats_page,
-                     self.settings_page):
+                     self.shots_page, self.settings_page):
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
 
@@ -3586,6 +4861,20 @@ class MainWindow(QMainWindow):
             self.sidebar.setVisible(False)
         self.target = None
         self._snap = None
+        shot_opts = (self.config.get("screenshot") or {})
+        self.shot_store = shots.ScreenshotStore(shot_opts.get("path") or None)
+        self.hotkeys = HotkeyManager(self)
+        self.hotkeys.triggered.connect(self._on_hotkey)
+        self.shot_signals = ShotSignals(self)
+        self.shot_signals.finished.connect(self._on_shot_saved)
+        self._hotkey_state = False
+        self._hotkey_timer = QTimer(self)
+        self._hotkey_timer.setInterval(50)
+        self._hotkey_timer.timeout.connect(self._poll_hotkey)
+        self._hotkey_retry = QTimer(self)
+        self._hotkey_retry.setInterval(5000)
+        self._hotkey_retry.timeout.connect(self._register_hotkey)
+        self._hotkey_retry.start()
         self.native_snap = winframe.apply_native_frame(self)
         if self.native_snap:
             self._frame_filter = winframe.NativeFrameFilter(lambda: self)
@@ -3862,7 +5151,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
         for index, label in enumerate(("Library", "Now reading", "Statistics",
-                                       "Settings")):
+                                       "Screenshots", "Settings")):
             menu.addAction(label, lambda i=index: self.go(i))
         menu.addSeparator()
         menu.addAction(tr("Show sidebar"), self.toggle_sidebar)
@@ -3870,13 +5159,27 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- icon / tray
     def _app_icon(self):
-        """icon.ico next to main.py (or one folder up), else the drawn sun."""
-        from .store import APP_DIR
-        for candidate in (Path(APP_DIR) / "icon.ico",
-                          Path(APP_DIR).parent / "icon.ico"):
-            if candidate.exists():
-                return QIcon(str(candidate))
-        return paint_sun(32)
+        """icon.ico from the data folder, the bundle, or one level up.
+
+        In a PyInstaller build icon.ico lives inside the bundle (_MEIPASS), not
+        next to the exe, so the bundle has to be searched too - otherwise the
+        title bar and the tray fell back to the drawn sun.
+        """
+        from .core import APP_DIR, BUNDLE_DIR
+        folders = [Path(APP_DIR), Path(BUNDLE_DIR), Path(APP_DIR).parent,
+                   Path(__file__).resolve().parent.parent]
+        seen = set()
+        for folder in folders:
+            candidate = folder / "icon.ico"
+            key = str(candidate)
+            if key in seen or not candidate.exists():
+                continue
+            seen.add(key)
+            icon = QIcon(str(candidate))
+            if not icon.isNull():
+                return icon
+        from PySide6.QtWidgets import QStyle
+        return self.style().standardIcon(QStyle.SP_ApplicationIcon)
 
     def _setup_icon(self):
         icon = self._app_icon()
@@ -3952,6 +5255,14 @@ class MainWindow(QMainWindow):
             self.stats_page.refresh()
             self.stats_page.refresh()
 
+    def flash_status(self, text, seconds=2.5):
+        """Temporary message in the status bar."""
+        try:
+            self.status_text.setText(text)
+            QTimer.singleShot(int(seconds * 1000), self._refresh_status)
+        except Exception:
+            pass
+
     def toggle_theme(self):
         self.palette = LIGHT if self.palette is DARK else DARK
         self.apply_theme()
@@ -3967,6 +5278,10 @@ class MainWindow(QMainWindow):
         self.title_line.update()
         self.title_frame.update()
         self.title_bar.update()
+        if hasattr(self, "shots_page"):
+            self.shots_page._fill()
+        if hasattr(self, "settings_page"):
+            self.settings_page.refresh_variables()
         moon = self.palette is DARK
         self.title_bar.theme_button.setIcon(
             paint_moon(hole=self.palette["bg"]) if moon
@@ -4133,7 +5448,9 @@ class Application:
             except Exception:
                 pass
         try:
-            store.save_config(self.config)
+            # the window owns the live config; self.config may be a stale dict
+            live = getattr(getattr(self, "window", None), "config", None) or self.config
+            store.save_config(live)
         except Exception:
             pass
         try:

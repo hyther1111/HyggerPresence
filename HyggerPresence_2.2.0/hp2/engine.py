@@ -22,8 +22,11 @@ from .winapi import wait_for_process_exit
 MAX_LINE = 128
 RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
-KEEPALIVE = 55.0             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
-STATUS_DEBOUNCE = 0.5        # a new status must hold this long before it is pushed
+KEEPALIVE = 40.0            # Discord drops an activity that is not refreshed; 1.0.x used 55 s
+MIN_PUSH_INTERVAL = 0.8        # floor between two sends
+PUSH_BURST = 5                 # Discord allows 5 updates ...
+PUSH_WINDOW = 20.0             # ... per 20 s, so allow exactly that             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
+STATUS_DEBOUNCE = 0.15        # a new status must hold this long before it is pushed
 
 
 def _clip(value, limit=MAX_LINE):
@@ -411,6 +414,7 @@ class Engine(DetectorMixin):
                           % (getattr(func, "__name__", "call"), elapsed))
 
     def _mark_dead(self, error):
+        debug_log("rpc marked dead: %s" % error)
         """Drop the connection so the next action reconnects from scratch."""
         self.last_error = "rpc: %s" % error
         lowered = str(error).lower()
@@ -568,9 +572,15 @@ class Engine(DetectorMixin):
         folder_b = self._folder_of(second)
         return bool(folder_a) and folder_a == folder_b
 
+    @staticmethod
+    def _game_key(game):
+        """Stable identity of a game for session bookkeeping."""
+        return (game.get("exe") or "", game.get("vndb_id") or "",
+                game.get("title") or game.get("original") or "")
+
     def _apply_clock(self, game, status, now):
         """1.0.4 behaviour: session belongs to the current game, nothing remembered."""
-        if self._session_exe != game.get("exe"):
+        if self._session_exe != self._game_key(game):
             previous = self._session_exe
             if self._reading_start is not None:
                 # bank the stretch that is still running before switching away
@@ -592,7 +602,7 @@ class Engine(DetectorMixin):
                 # the game swapped its own executable: the session continues
                 self._session_memory.pop(previous, None)
                 self._grace = None
-                self._session_exe = exe
+                self._session_exe = self._game_key(game)
                 self._reading_start = None
                 self.session_seconds = self._session_accumulated
                 self.total_seconds = game.get("total_seconds", 0)
@@ -604,7 +614,7 @@ class Engine(DetectorMixin):
                         self._session_memory[previous] = self._session_accumulated
                     else:
                         self._session_memory.pop(previous, None)
-                self._session_exe = exe
+                self._session_exe = self._game_key(game)
                 self._session_accumulated = self._session_memory.pop(exe, 0.0)
             self._reading_start = None
             self.session_seconds = self._session_accumulated
@@ -669,22 +679,24 @@ class Engine(DetectorMixin):
         """Reconnect and republish when the card went stale - never on the UI thread."""
         if not self.presence_enabled or self.game is None or self.status is None:
             return False
-        if time.time() - self._last_sent < 30 or self._watchdog_busy:
+        if time.time() - self._last_sent < KEEPALIVE + 15 or self._watchdog_busy:
             return False
         self._watchdog_busy = True
         self._submit(self._watchdog_job)
         return True
 
     def _watchdog_job(self):
+        """Republish without dropping a healthy connection.
+
+        This used to close the socket first, so the card disappeared and came
+        back every time the watchdog ran (~30 s) - the "disconnect" the user saw.
+        """
         try:
-            with self._rpc_lock:
-                if self.rpc is not None:
-                    try:
-                        self.rpc.close()
-                    except Exception:
-                        pass
-                self.rpc = None
-            self._last_sent = 0.0
+            debug_log("watchdog: last_sent %.0fs ago, rpc=%s"
+                      % (time.time() - self._last_sent,
+                         "open" if self.rpc else "closed"))
+            if self.rpc is None:
+                self._last_sent = 0.0
             if self.game is not None and self.status is not None:
                 self._push(self.game, self.status)
         finally:
@@ -770,18 +782,41 @@ class Engine(DetectorMixin):
             identity_changed = identity != self._pushed_identity
             status_changed = status != self._pushed_status
             if status != self.status:
-                debug_log("status %s -> %s (candidate)" % (self.status, status))
+                debug_log("status %s -> %s (candidate, push in %.1fs)"
+                          % (self.status, status,
+                             max(0.0, STATUS_DEBOUNCE - (now - candidate[1]))))
             self.status = status
             self.preview = self._build_preview(game, status)
+            now_i = int(now)
+            if now_i - getattr(self, "_clock_log_at", 0) >= 5:
+                self._clock_log_at = now_i
+                try:
+                    debug_log("clock st=%s sess=%.0f acc=%.0f reading_start=%s "
+                              "key=%s pushed_st=%s"
+                              % (status, float(self.session_seconds or 0),
+                                 float(self._session_accumulated or 0),
+                                 "yes" if self._reading_start else "no",
+                                 self._session_exe, self._pushed_status))
+                except Exception:
+                    pass
+            if status_changed and not (stable or first_push):
+                debug_log("status %s waiting: %.1fs of %.1fs settled"
+                          % (status, now - candidate[1], STATUS_DEBOUNCE))
             should_push = (identity_changed
                            or (status_changed and (stable or first_push))
                            or now - self._last_sent >= KEEPALIVE)
             if should_push and not (status_changed and not (stable or first_push)):
                 if self.presence_enabled:
-                    debug_log("status %s accepted after %.1fs" % (status, now - candidate[1]))
-                    self._push(game, status)
-                    self._pushed_identity = identity
-                    self._pushed_status = status
+                    sent = self._push(game, status)
+                    if sent:
+                        debug_log("status %s pushed after %.1fs"
+                                  % (status, now - candidate[1]))
+                    if sent:
+                        self._pushed_identity = identity
+                        self._pushed_status = status
+                    else:
+                        # nothing reached Discord: try again on the next tick
+                        self._pushed_status = None
             self._notify()
         except Exception as error:
             self.last_error = "tick: %s" % error
@@ -839,8 +874,23 @@ class Engine(DetectorMixin):
     def _push(self, game, status):
         """Compose the payload here (cheap) and send it on the worker thread."""
         preview = self.preview
-        if not preview or time.time() < self._next_push_at:
-            return
+        now = time.time()
+        if not preview or now < self._next_push_at:
+            return False
+        if self._last_sent and now - self._last_sent < MIN_PUSH_INTERVAL:
+            debug_log("push throttled: %.2fs since the last send"
+                      % (now - self._last_sent))
+            return False
+        if now - getattr(self, "_last_push_begin", 0.0) < 0.3:
+            return False
+        sent_times = [stamp for stamp in getattr(self, "_sent_log", [])
+                      if now - stamp < PUSH_WINDOW]
+        self._sent_log = sent_times
+        if len(sent_times) >= PUSH_BURST:
+            debug_log("push throttled: %d updates in the last %.0fs"
+                      % (len(sent_times), PUSH_WINDOW))
+            return False
+        self._last_push_begin = now
         try:
             kwargs = {
                 "name": _clip(preview["title"], 128),
@@ -871,10 +921,14 @@ class Engine(DetectorMixin):
             if preview.get("start") and opts.get("show_timer", True):
                 kwargs["start"] = preview["start"]
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            self._sent_log = getattr(self, "_sent_log", [])
+            self._sent_log.append(now)
             self._push_token += 1
             self._submit(self._do_push, kwargs, game.get("image"), self._push_token)
+            return True
         except Exception as error:
             self.last_error = "compose: %s" % error
+            return False
 
     def _do_push(self, kwargs, cover, token=None):
         started_at = time.time()
@@ -885,6 +939,7 @@ class Engine(DetectorMixin):
             debug_log("push done in %.0f ms" % ((time.time() - started_at) * 1000.0))
 
     def _do_push_inner(self, kwargs, cover, token, started_at):
+        debug_log("connecting: rpc=%s" % ("open" if self.rpc else "closed"))
         """Worker thread: connect if needed, send, fall back, close on failure."""
         if not self.rpc and not self.connect():
             return
@@ -911,9 +966,9 @@ class Engine(DetectorMixin):
             self._retry_count = 0
         except Exception as error:
             self.last_error = "rpc: %s" % error
-            # Discord rate limits activity updates: wait before trying again
-            lowered = str(error).lower()
-            self._next_push_at = time.time() + (60.0 if "rate" in lowered else 3.0)
+            debug_log("update failed: %s" % error)
+            self._next_push_at = time.time() + MIN_PUSH_INTERVAL
+            self._pushed_status = None
             self._close_async(presence)
             if self.rpc is presence:
                 self.rpc = None
@@ -989,7 +1044,7 @@ class Engine(DetectorMixin):
             if self._session_accumulated > 0:
                 self._grace = (time.time(), folder, title,
                                self._session_accumulated, key)
-                debug_log("session held (exit watch): exe=%s folder=%s title=%s "
+                debug_log("session held (exit watch fired): exe=%s folder=%s title=%s "
                           "secs=%.1f" % (key, folder, title,
                                          self._session_accumulated))
             # the process watcher noticed the exit first: clear the session here too,

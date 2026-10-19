@@ -48,6 +48,9 @@ DEFAULT_CONFIG = {
     "presence": dict(DEFAULT_PRESENCE),
     "launchers": [],
     "close_to_tray": True,
+    "screenshot": {"path": "", "hotkey": "", "sound": "",
+                   "trim_bars": True, "copy_clipboard": False,
+                   },
 }
 
 
@@ -67,6 +70,27 @@ def _quarantine(path, reason):
     except Exception:
         pass
     return backup
+
+
+def _deep_merge(base, overlay):
+    if not isinstance(base, dict) or not isinstance(overlay, dict):
+        return overlay if overlay is not None else base
+    result = dict(base)
+    for key, value in overlay.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _read_json(path):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        pass
+    return {}
 
 
 def _write_json(path, payload):
@@ -101,11 +125,56 @@ def load_config():
     return dict(DEFAULT_CONFIG)
 
 
+def _strip_defaults(values, defaults):
+    """Drop values that still equal the built-in default.
+
+    The settings page hands us the whole in-memory config, which was built from
+    DEFAULT_CONFIG plus the file. Writing that back would replace keys the page
+    never touched (client_id, launchers, ...) with their defaults, so anything
+    still at its default is left out of the write and the file value survives.
+    """
+    if not isinstance(values, dict):
+        return values
+    result = {}
+    for key, value in values.items():
+        default = defaults.get(key) if isinstance(defaults, dict) else None
+        if isinstance(value, dict) and isinstance(default, dict):
+            nested = _strip_defaults(value, default)
+            if nested:
+                result[key] = nested
+        elif value == default and default is not None:
+            continue
+        elif isinstance(value, list) and isinstance(default, list) and value == default:
+            continue
+        else:
+            result[key] = value
+    return result
+
+
+def update_config_section(section, values):
+    """Write only one section of config.json, leaving everything else alone."""
+    data = _read_json(CONFIG_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    current = data.get(section)
+    if not isinstance(current, dict):
+        current = {}
+    current.update(values or {})
+    data[section] = current
+    _write_json(CONFIG_FILE, data)
+
+
 def save_config(config):
+    existing = _read_json(CONFIG_FILE)
+    if isinstance(existing, dict) and isinstance(config, dict):
+        config = _deep_merge(existing, _strip_defaults(config, DEFAULT_CONFIG))
     _write_json(CONFIG_FILE, config)
 
 
-LEGACY_DIR = APP_DIR.parent     # one level up: where the 1.x scripts live
+# The 1.x data lives next to the *program*, not next to the new data folder in
+# %APPDATA%, so the import looks one level above the install directory.
+from .core import INSTALL_DIR
+LEGACY_DIR = INSTALL_DIR.parent
 
 
 def _json_is_empty(path):

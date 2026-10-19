@@ -44,13 +44,13 @@ GITHUB_REPO = "hyther1111/HyggerPresence"   # owner/repo - used by Check Update
 
 
 
-def _base_dir():
-    """Folder that holds games.json / config.json / stats.db.
+DATA_DIR_NAME = "HyggerPresence"
+DATA_FILES = ("games.json", "config.json", "stats.db",
+              "stats.db-wal", "stats.db-shm", "presence_debug.log")
 
-    Frozen  -> next to the .exe.
-    Script  -> next to the *entry* script (sys.argv[0]), so the package can live
-               in hp2/ while the data stays beside main.py.
-    """
+
+def _install_dir():
+    """Folder the program itself lives in (read only for the data)."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     argv0 = (sys.argv[0] or "").strip()
@@ -64,12 +64,59 @@ def _base_dir():
     return Path(__file__).resolve().parent.parent
 
 
+def _base_dir():
+    """Folder that holds games.json / config.json / stats.db.
+
+    %APPDATA%\\HyggerPresence on Windows, so the install folder stays clean.
+    HYGGER_DATA_DIR overrides it (portable mode / tests).
+    """
+    override = str(os.environ.get("HYGGER_DATA_DIR", "")).strip()
+    if override:
+        target = Path(override)
+    elif os.name == "nt":
+        root = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        target = Path(root) / DATA_DIR_NAME if root else Path.home() / ("." + DATA_DIR_NAME)
+    else:
+        target = Path.home() / (".config/" + DATA_DIR_NAME)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        target = _install_dir()
+    _migrate_if_needed(target)
+    return target
+
+
+def _migrate_if_needed(target):
+    """Copy data files left next to the program into the new folder, once."""
+    source = _install_dir()
+    if source == target:
+        return
+    if (target / "games.json").exists():
+        return
+    moved = []
+    for name in DATA_FILES:
+        candidate = source / name
+        if not candidate.exists():
+            continue
+        try:
+            shutil.copy2(candidate, target / name)
+            moved.append(name)
+        except Exception:
+            pass
+    if moved:
+        try:
+            debug_log("migrated %s from %s" % (", ".join(moved), source))
+        except Exception:
+            pass
+
+
+INSTALL_DIR = _install_dir()
+APP_DIR = _base_dir()
+
 if getattr(sys, "frozen", False):
-    APP_DIR = Path(sys.executable).parent
-    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", INSTALL_DIR))
 else:
-    APP_DIR = _base_dir()
-    BUNDLE_DIR = APP_DIR
+    BUNDLE_DIR = INSTALL_DIR
 
 GAMES_FILE = APP_DIR / "games.json"
 CONFIG_FILE = APP_DIR / "config.json"
