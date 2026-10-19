@@ -16,9 +16,8 @@ import re
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
 
 APP_FOLDER = "HyggerPresence"
 FOLDER_FALLBACK = "Unknown game"
@@ -163,15 +162,6 @@ def foreground_client_rect():
 
 
 # --------------------------------------------------------------------- capture
-def capture_screen():
-    """The primary screen as a pixmap, or None."""
-    screen = QGuiApplication.primaryScreen()
-    if screen is None:
-        return None
-    pixmap = screen.grabWindow(0)
-    return None if pixmap.isNull() else pixmap
-
-
 def pixmap_crop_hints(pixmap, screen):
     """Candidate factors that map logical coordinates onto the grab."""
     logical = max(1, screen.geometry().width())
@@ -194,95 +184,3 @@ def capture_window():
         if candidate.width() >= 4 and candidate.height() >= 4:
             return full.copy(candidate)
     return None
-
-
-class RegionSelector(QWidget):
-    """Overlay: drag a rectangle to grab that part of the screen."""
-
-    picked = Signal(object)          # QPixmap or None
-
-    def __init__(self):
-        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-                         | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setCursor(Qt.CrossCursor)
-        self._origin = QPoint()
-        self._current = QPoint()
-        self._dragging = False
-        screen = QGuiApplication.primaryScreen()
-        self._screen = screen
-        self.setGeometry(screen.geometry())
-        self._background = screen.grabWindow(0)
-        self._factor = self._background.width() / max(1, self.width())
-        self._preview = self._background.scaled(self.size(), Qt.IgnoreAspectRatio,
-                                                Qt.SmoothTransformation)
-
-    # ------------------------------------------------------------------ events
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._origin = event.position().toPoint()
-            self._current = self._origin
-            self._dragging = True
-            self.update()
-
-    def mouseMoveEvent(self, event):
-        if self._dragging:
-            self._current = event.position().toPoint()
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() != Qt.LeftButton or not self._dragging:
-            return
-        self._dragging = False
-        rect = self._selection()
-        self.hide()
-        if rect.width() < 3 or rect.height() < 3:
-            self.picked.emit(None)
-            self.close()
-            return
-        bounds = QRect(0, 0, self._background.width(), self._background.height())
-        source = scale_rect(rect, self._factor, bounds)
-        self.picked.emit(self._background.copy(source) if source.isValid() else None)
-        self.close()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.hide()
-            self.picked.emit(None)
-            self.close()
-
-    # ----------------------------------------------------------------- drawing
-    def _selection(self):
-        return QRect(self._origin, self._current).normalized()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self._preview)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 90))
-        rect = self._selection()
-        if not rect.isValid() or rect.width() < 2:
-            return
-        bounds = QRect(0, 0, self._background.width(), self._background.height())
-        painter.drawPixmap(rect, self._background, scale_rect(rect, self._factor, bounds))
-        painter.setPen(QPen(QColor("#5b8def"), 2))
-        painter.drawRect(rect)
-        painter.setPen(QColor("#ffffff"))
-        offset = rect.topLeft() + QPoint(6, -8 if rect.top() > 20 else 16)
-        painter.drawText(offset, describe_size(rect))
-
-
-def start_region_capture(on_done):
-    """Show the overlay; on_done(pixmap_or_None) runs when the user finished."""
-    selector = RegionSelector()
-
-    def finished(pixmap):
-        try:
-            on_done(pixmap)
-        finally:
-            selector.deleteLater()
-
-    selector.picked.connect(finished)
-    selector.show()
-    selector.raise_()
-    selector.activateWindow()
-    return selector
