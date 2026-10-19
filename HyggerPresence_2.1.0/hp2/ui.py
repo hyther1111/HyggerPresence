@@ -2805,7 +2805,8 @@ class ScreenshotMixin:
             return
         self._last_capture_at = now
         capture_opts = (self.config.get("screenshot") or {})
-        mode = (capture_opts.get("mode") or "auto")
+        forced = shots.modifier_down("shift")
+        mode = "screen" if forced else (capture_opts.get("mode") or "auto")
         if mode == "screen":
             whole_screen = True
         elif mode == "window":
@@ -2822,9 +2823,9 @@ class ScreenshotMixin:
                 if "magpie" in name or "lossless" in name:
                     whole_screen = True
             try:
-                debug_log("auto capture: foreground=%r probe=%r game=%r -> %s"
-                          % (shots.foreground_process_name(), probe, game_name,
-                             "screen" if whole_screen else "window"))
+                debug_log("capture mode: shift=%s foreground=%r probe=%r game=%r -> %s"
+                          % (forced, shots.foreground_process_name(), probe,
+                             game_name, "screen" if whole_screen else "window"))
             except Exception:
                 pass
         if whole_screen:

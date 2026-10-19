@@ -358,6 +358,20 @@ def foreground_is_upscaler():
     return any(key in name for key in UPSCALERS)
 
 
+_MODIFIER_KEYS = {"shift": 0x10, "ctrl": 0x11, "alt": 0x12}
+
+
+def modifier_down(name):
+    """Physical state of a modifier key, independent of the focused window."""
+    key = _MODIFIER_KEYS.get(name)
+    if key is None:
+        return False
+    try:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
+    except Exception:
+        return False
+
+
 def foreground_hwnd():
     try:
         return int(ctypes.windll.user32.GetForegroundWindow() or 0)
