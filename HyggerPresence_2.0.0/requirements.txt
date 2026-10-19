@@ -1,0 +1,5 @@
+PySide6-Essentials>=6.6
+pypresence>=4.3
+psutil>=5.9
+requests>=2.31
+Pillow>=10.0
