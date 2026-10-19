@@ -1942,15 +1942,14 @@ class ScreenshotSettingsMixin:
         layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Capture area")))
         self.shot_mode = QComboBox()
-        self.shot_mode.addItems([tr("Auto (upscaler aware)"), tr("Game window"),
-                                 tr("Whole screen")])
-        current = opts.get("mode") or "auto"
-        self.shot_mode.setCurrentIndex({"window": 1, "screen": 2}.get(current, 0))
+        self.shot_mode.addItems([tr("Game window"), tr("Whole screen")])
+        current = opts.get("mode") or "window"
+        self.shot_mode.setCurrentIndex(1 if current == "screen" else 0)
         self.shot_mode.currentIndexChanged.connect(self._mode_changed)
         layout.addWidget(self.shot_mode)
-        self._help(layout, tr("Whole screen grabs everything, which is what you "
-                              "want when an upscaler such as Magpie is showing "
-                              "the game full screen."))
+        self._help(layout, tr("Whole screen grabs everything on the display. "
+                              "Use it for tools such as Magpie that show the game "
+                              "full screen and cannot be detected."))
 
         layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Whole screen modifier")))
@@ -1987,7 +1986,7 @@ class ScreenshotSettingsMixin:
         store.update_config_section("screenshot", {"screen_modifier": name})
 
     def _mode_changed(self, index):
-        mode = {1: "window", 2: "screen"}.get(index, "auto")
+        mode = "screen" if index == 1 else "window"
         opts = self.window.config.setdefault("screenshot", {})
         opts["mode"] = mode
         store.update_config_section("screenshot", {"mode": mode})
@@ -2824,30 +2823,13 @@ class ScreenshotMixin:
         self._last_capture_at = now
         capture_opts = (self.config.get("screenshot") or {})
         forced = shots.modifier_down(capture_opts.get("screen_modifier") or "alt")
-        mode = "screen" if forced else (capture_opts.get("mode") or "auto")
-        if mode == "screen":
-            whole_screen = True
-        elif mode == "window":
-            whole_screen = False
-        else:
-            # Auto: an upscaler is in front when its process matches, or when
-            # whatever is in front covers the screen while our game is smaller.
-            game_exe = (self.engine.game or {}).get("exe") or ""
-            game_name = Path(game_exe).name.lower() if game_exe else ""
-            injected = shots.process_has_injection(game_name)
-            probe = None if injected else shots.upscaler_window()
-            whole_screen = injected
-            if not whole_screen and probe is not None:
-                name = probe[0]
-                if "magpie" in name or "lossless" in name:
-                    whole_screen = True
-            try:
-                debug_log("capture mode: modifier=%s injected=%s probe=%r "
-                          "game=%r -> %s"
-                          % (forced, injected, probe, game_name,
-                             "screen" if whole_screen else "window"))
-            except Exception:
-                pass
+        mode = capture_opts.get("mode") or "window"
+        whole_screen = forced or mode == "screen"
+        try:
+            debug_log("capture mode: modifier=%s setting=%r -> %s"
+                      % (forced, mode, "screen" if whole_screen else "window"))
+        except Exception:
+            pass
         if whole_screen:
             # upscalers draw in their own window, the game itself may be tiny
             if not self.engine.game:
