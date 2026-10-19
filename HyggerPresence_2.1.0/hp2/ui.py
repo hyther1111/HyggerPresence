@@ -1887,6 +1887,16 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("One folder per game, named after the title."))
 
         layout.addSpacing(12)
+        layout.addWidget(QLabel(tr("Screenshot title")))
+        self.shot_title_mode = QComboBox()
+        self.shot_title_mode.addItems([tr("Original title"), tr("Romanised title")])
+        current = (opts.get("title_mode")
+                   or self.window.config.get("library_title_mode") or "original")
+        self.shot_title_mode.setCurrentIndex(1 if current == "romanized" else 0)
+        self.shot_title_mode.currentIndexChanged.connect(self._shot_title_changed)
+        layout.addWidget(self.shot_title_mode)
+
+        layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Hotkey")))
         line = QHBoxLayout()
         line.addWidget(QLabel(tr("Capture the active window")))
@@ -1905,6 +1915,14 @@ class ScreenshotSettingsMixin:
 
         layout.addStretch(1)
         return page
+
+    def _shot_title_changed(self, index):
+        mode = "romanized" if index == 1 else "original"
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["title_mode"] = mode
+        store.save_config(self.window.config)
+        if hasattr(self.window, "shots_page"):
+            self.window.shots_page.refresh()
 
     def _bind_hotkey_click(self, event):
         self.window.start_hotkey_capture(self.shot_hotkey)
@@ -1986,8 +2004,25 @@ class ScreenshotPage(Page):
         except Exception:
             return None
 
+    def _search_blob(self, folder):
+        """Everything the library would match, so search behaves the same."""
+        parts = [folder]
+        for game in getattr(self.window.app, "games", []) or []:
+            if shots.sanitise(game.get("original") or game.get("title") or "") != folder:
+                continue
+            parts.extend(str(game.get(key, "")) for key in
+                         ("original", "title", "romanized", "developer", "year",
+                          "vndb_id", "exe"))
+            break
+        return " ".join(parts).lower()
+
+    def _title_mode(self):
+        opts = self.window.config.get("screenshot") or {}
+        return (opts.get("title_mode")
+                or self.window.config.get("library_title_mode") or "original")
+
     def _library_title(self, folder):
-        romanise = (self.window.config.get("library_title_mode") or "original") == "romanized"
+        romanise = self._title_mode() == "romanized"
         for game in getattr(self.window.app, "games", []) or []:
             original = game.get("original") or game.get("title") or ""
             if shots.sanitise(original) != folder:
@@ -2040,8 +2075,7 @@ class ScreenshotPage(Page):
             games = store_.games_with_shots()
             needle = (self.search.text() or "").strip().lower()
             if needle:
-                games = [g for g in games if needle in g[0].lower()
-                         or needle in self._library_title(g[0]).lower()]
+                games = [g for g in games if needle in self._search_blob(g[0])]
             self.count_label.setText(tr("%d screenshot(s)") % sum(c for _f, c in games))
             columns = self._columns(width, self.COVER)
             for index, (folder, count) in enumerate(games):
@@ -2112,12 +2146,72 @@ class ScreenshotPage(Page):
         name.setObjectName("sub")
         name.setWordWrap(True)
         lay.addWidget(name)
-        card.mouseDoubleClickEvent = lambda _e, p=path: self._open(p)
+        card.mouseDoubleClickEvent = lambda _e, p=path: self.preview(p)
         return card
 
     def _open(self, path):
         try:
             os.startfile(str(path))
+        except Exception:
+            pass
+
+    def preview(self, path):
+        """Large view with Copy / Open / Show in folder / Delete."""
+        from PySide6.QtWidgets import QDialog, QApplication as _QApp
+        path = Path(path)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(path.name)
+        dialog.setMinimumSize(900, 620)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(10)
+
+        pixmap = QPixmap(str(path))
+        picture = QLabel()
+        picture.setAlignment(Qt.AlignCenter)
+        if not pixmap.isNull():
+            picture.setPixmap(pixmap.scaled(860, 480, Qt.KeepAspectRatio,
+                                            Qt.SmoothTransformation))
+        layout.addWidget(picture, 1)
+
+        info = QLabel("%s   \u2022   %d x %d   \u2022   %s"
+                      % (path.name, pixmap.width(), pixmap.height(),
+                         time.strftime("%Y-%m-%d %H:%M",
+                                       time.localtime(path.stat().st_mtime))))
+        info.setObjectName("sub")
+        layout.addWidget(info)
+
+        buttons = QHBoxLayout()
+        copy = QPushButton(tr("Copy"))
+        copy.clicked.connect(lambda: _QApp.clipboard().setPixmap(pixmap))
+        buttons.addWidget(copy)
+        open_it = QPushButton(tr("Open"))
+        open_it.clicked.connect(lambda: self._open(path))
+        buttons.addWidget(open_it)
+        reveal = QPushButton(tr("Show in folder"))
+        reveal.clicked.connect(lambda: self._reveal(path))
+        buttons.addWidget(reveal)
+        remove = QPushButton(tr("Delete"))
+        def do_delete():
+            shots.ScreenshotStore.delete(path)
+            dialog.accept()
+            self.refresh()
+        remove.clicked.connect(do_delete)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        close = QPushButton(tr("Close"))
+        close.clicked.connect(dialog.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+        dialog.exec()
+        self.refresh()
+
+    @staticmethod
+    def _reveal(path):
+        try:
+            import subprocess
+            subprocess.Popen(["explorer", "/select,", str(path)])
         except Exception:
             pass
 
@@ -2140,12 +2234,25 @@ class ScreenshotMixin:
             self.shots_page.refresh()
 
     def open_screenshot_folder(self):
+        """Reveal Pictures\\HyggerPresence in Explorer."""
         store_ = getattr(self, "shot_store", None)
-        if store_ is None:
-            return
+        folder = store_.root if store_ is not None else None
+        if folder is None:
+            from .screenshot import default_base_dir
+            folder = default_base_dir()
         try:
-            store_.root.mkdir(parents=True, exist_ok=True)
-            os.startfile(str(store_.root))
+            Path(folder).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        target = str(Path(folder))
+        try:
+            os.startfile(target)
+            return
+        except Exception:
+            pass
+        try:
+            import subprocess
+            subprocess.Popen(["explorer", target])
         except Exception:
             pass
 
