@@ -23,10 +23,10 @@ MAX_LINE = 128
 RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
 KEEPALIVE = 40.0            # Discord drops an activity that is not refreshed; 1.0.x used 55 s
-MIN_PUSH_INTERVAL = 1.5        # floor between two sends
+MIN_PUSH_INTERVAL = 0.8        # floor between two sends
 PUSH_BURST = 5                 # Discord allows 5 updates ...
 PUSH_WINDOW = 20.0             # ... per 20 s, so allow exactly that             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
-STATUS_DEBOUNCE = 0.6        # a new status must hold this long before it is pushed
+STATUS_DEBOUNCE = 0.15        # a new status must hold this long before it is pushed
 
 
 def _clip(value, limit=MAX_LINE):
