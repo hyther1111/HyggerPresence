@@ -33,6 +33,7 @@ from . import updater
 from . import winframe
 from . import i18n
 from .i18n import LANGUAGES, set_language, tr
+from .core import debug_log
 from . import screenshot as shots
 from .hotkey import HotkeyManager, describe, from_qt
 from . import hotkey as hotkey_mod
