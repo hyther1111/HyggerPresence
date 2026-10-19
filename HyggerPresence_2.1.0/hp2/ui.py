@@ -4864,6 +4864,42 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         # Qt can reset the style after the first show: re-apply the native frame
         if getattr(self, "native_snap", False):
             winframe.apply_native_frame(self)
+        self._set_background_mode(False)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._set_background_mode(True)
+
+    def _set_background_mode(self, background):
+        """Tray-only: stop every timer that only exists to repaint the window."""
+        if getattr(self, "_background", None) == background:
+            return
+        self._background = background
+        timers = [getattr(self, "clock_timer", None),
+                  getattr(self, "cover_timer", None)]
+        page = getattr(self, "shots_page", None)
+        if page is not None:
+            timers.extend([getattr(page, "_refresh_timer", None),
+                           getattr(page, "_thumb_timer", None),
+                           getattr(page, "_resize_timer", None)])
+        stats = getattr(self, "stats_page", None)
+        if stats is not None:
+            timers.append(getattr(stats, "_auto", None))
+        for timer in timers:
+            if timer is None:
+                continue
+            try:
+                if background:
+                    timer.stop()
+                elif not timer.isActive():
+                    timer.start()
+            except Exception:
+                pass
+        try:
+            from .core import debug_log
+            debug_log("background mode %s" % ("on" if background else "off"))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------- snap preview
     def show_snap_preview(self, target, animate_from=None):

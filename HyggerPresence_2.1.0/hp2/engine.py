@@ -966,14 +966,18 @@ class Engine(DetectorMixin):
             self._retry_count = 0
         except Exception as error:
             self.last_error = "rpc: %s" % error
-            # Discord rate limits activity updates: wait before trying again
-            # 1.0.3 closed the socket and reconnected on the next tick; waiting a
-            # full minute left the card missing for a minute.
+            debug_log("update failed: %s" % error)
+            lowered = str(error).lower()
             self._next_push_at = time.time() + MIN_PUSH_INTERVAL
             self._pushed_status = None
-            self._close_async(presence)
-            if self.rpc is presence:
-                self.rpc = None
+            # only a dead pipe needs a new connection; anything else (a badge,
+            # a rate limit) can reuse the socket and the next push will retry
+            dead_pipe = any(word in lowered for word in
+                            ("pipe", "closed", "broken", "shutdown", "connection"))
+            if dead_pipe:
+                self._close_async(presence)
+                if self.rpc is presence:
+                    self.rpc = None
 
     def set_presence_enabled(self, enabled):
         self.presence_enabled = bool(enabled)
