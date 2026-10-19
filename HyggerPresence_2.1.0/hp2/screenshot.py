@@ -60,6 +60,24 @@ def default_base_dir():
     return base / APP_FOLDER
 
 
+def _write_png(pixmap, path):
+    """Encode with the fastest zlib level that still produces a real PNG."""
+    from PySide6.QtGui import QImageWriter
+    image = pixmap.toImage()
+    for level in (1, 3, 6):
+        writer = QImageWriter(str(path), b"png")
+        try:
+            writer.setCompression(level)
+        except Exception:
+            pass
+        if writer.write(image):
+            return True
+    try:
+        return bool(image.save(str(path), "PNG"))
+    except Exception:
+        return False
+
+
 class ScreenshotStore:
     """Folder layout and file naming."""
 
@@ -86,11 +104,10 @@ class ScreenshotStore:
 
     def save(self, pixmap, title, when=None):
         path = self.next_path(title, when)
-        # quality 40 keeps PNG fast: default compression costs ~150 ms per
-        # 2560x1440 frame and that was showing up as a CPU spike
-        if not pixmap.save(str(path), "PNG", 40):
-            if not pixmap.save(str(path), "PNG"):
-                raise OSError("could not write %s" % path)
+        # zlib level 1 instead of the default 6: ~4x faster encode, files are
+        # bigger but the measured 270 ms per 1702x958 frame was the CPU spike.
+        if not _write_png(pixmap, path):
+            raise OSError("could not write %s" % path)
         return path
 
     # ------------------------------------------------------------------- read
