@@ -2747,6 +2747,13 @@ class ScreenshotMixin:
     def take_screenshot(self):
         if not hasattr(self, "shot_store"):
             return
+        import time as _t
+        now = _t.time()
+        if now - getattr(self, "_last_capture_at", 0.0) < 0.4:
+            debug_log("capture ignored: %.2fs after the previous one"
+                      % (now - getattr(self, "_last_capture_at", 0.0)))
+            return
+        self._last_capture_at = now
         if not self.game_in_foreground():
             return
 
@@ -2770,6 +2777,8 @@ class ScreenshotMixin:
             return
         shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
         title = self.current_game_title() or shots.FOLDER_FALLBACK
+        debug_log("capture -> folder %r (engine game %r)"
+                  % (title, (self.engine.game or {}).get("title")))
         store_ = self.shot_store
 
         def save_in_background():

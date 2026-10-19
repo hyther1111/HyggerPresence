@@ -141,7 +141,12 @@ class ScreenshotStore:
                 if sub.is_dir():
                     images.extend(p for p in sub.iterdir()
                                   if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
-        return sorted(images, key=lambda p: p.stat().st_mtime, reverse=True)
+        def age(path):
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+        return sorted(images, key=age, reverse=True)
 
     @staticmethod
     def delete(path):
