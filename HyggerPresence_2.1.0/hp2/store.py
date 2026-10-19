@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "close_to_tray": True,
     "screenshot": {"path": "", "hotkey": "", "sound": "",
                    "trim_bars": True, "copy_clipboard": False,
-                   "mode": "window", "screen_modifier": "alt"},
+                   },
 }
 
 

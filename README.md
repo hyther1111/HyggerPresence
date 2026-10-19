@@ -102,8 +102,6 @@ Settings -> Screenshots:
 | Screenshot folder | Where the gallery lives. Defaults to `Pictures\HyggerPresence`; move it to another drive if you like. |
 | Hotkey | Global shortcut that captures the active window. Click the field, press the combination, press Escape to clear it. Unbound by default. |
 | Sound | Shutter sound played after each capture. Any WAV or MCI supported file (mp3, wma, m4a, flac, ogg); empty uses the Windows sound. |
-| Capture area | `Auto` (default) captures the whole screen while an upscaler is scaling the game (detected by the DLL it injects into the game process, or by its window), and the game window otherwise. `Game window` and `Whole screen` force one behaviour. |
-| Whole screen modifier | Holding this key (default `Alt`) while pressing the hotkey grabs the whole screen once. Pick `None` to disable, or change it when the modifier is already part of your hotkey. |
 | Trim black bars left and right | Removes the solid black borders an upscaler adds when the game keeps its aspect ratio (Magpie, 4:3 games on a 16:9 screen). On by default. |
 | Copy the screenshot to the clipboard | Puts the capture on the clipboard so it can be pasted into Discord or an editor. Off by default. |
 

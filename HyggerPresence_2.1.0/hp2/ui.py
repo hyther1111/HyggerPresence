@@ -1940,30 +1940,6 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("WAV file played after each screenshot."))
 
         layout.addSpacing(12)
-        layout.addWidget(QLabel(tr("Capture area")))
-        self.shot_mode = QComboBox()
-        self.shot_mode.addItems([tr("Game window"), tr("Whole screen")])
-        current = opts.get("mode") or "window"
-        self.shot_mode.setCurrentIndex(1 if current == "screen" else 0)
-        self.shot_mode.currentIndexChanged.connect(self._mode_changed)
-        layout.addWidget(self.shot_mode)
-        self._help(layout, tr("Whole screen grabs everything on the display. "
-                              "Use it for tools such as Magpie that show the game "
-                              "full screen and cannot be detected."))
-
-        layout.addSpacing(12)
-        layout.addWidget(QLabel(tr("Whole screen modifier")))
-        self.shot_modifier = QComboBox()
-        self.shot_modifier.addItems(["Alt", "Ctrl", "Shift", "None"])
-        order = {"alt": 0, "ctrl": 1, "shift": 2, "none": 3}
-        self.shot_modifier.setCurrentIndex(order.get(
-            (opts.get("screen_modifier") or "alt").lower(), 0))
-        self.shot_modifier.currentIndexChanged.connect(self._modifier_changed)
-        layout.addWidget(self.shot_modifier)
-        self._help(layout, tr("Hold this key while pressing the hotkey to capture "
-                              "the whole screen instead of the game window."))
-
-        layout.addSpacing(12)
         self.shot_trim = QCheckBox(tr("Trim black bars left and right"))
         self.shot_trim.setChecked(bool(opts.get("trim_bars", True)))
         self.shot_trim.toggled.connect(self._trim_changed)
@@ -1978,18 +1954,6 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("Paste straight into Discord or an image editor."))
         layout.addStretch(1)
         return page
-
-    def _modifier_changed(self, index):
-        name = {0: "alt", 1: "ctrl", 2: "shift", 3: "none"}.get(index, "alt")
-        opts = self.window.config.setdefault("screenshot", {})
-        opts["screen_modifier"] = name
-        store.update_config_section("screenshot", {"screen_modifier": name})
-
-    def _mode_changed(self, index):
-        mode = "screen" if index == 1 else "window"
-        opts = self.window.config.setdefault("screenshot", {})
-        opts["mode"] = mode
-        store.update_config_section("screenshot", {"mode": mode})
 
     def _trim_changed(self, enabled):
         opts = self.window.config.setdefault("screenshot", {})
@@ -2822,23 +2786,6 @@ class ScreenshotMixin:
             return
         self._last_capture_at = now
         capture_opts = (self.config.get("screenshot") or {})
-        forced = shots.modifier_down(capture_opts.get("screen_modifier") or "alt")
-        mode = capture_opts.get("mode") or "window"
-        whole_screen = forced or mode == "screen"
-        try:
-            debug_log("capture mode: modifier=%s setting=%r -> %s"
-                      % (forced, mode, "screen" if whole_screen else "window"))
-        except Exception:
-            pass
-        if whole_screen:
-            # upscalers draw in their own window, the game itself may be tiny
-            if not self.engine.game:
-                return
-            pixmap = shots.capture_screen()
-            if pixmap is None:
-                return
-            self._deliver_capture(pixmap, capture_opts)
-            return
         if not self.game_in_foreground():
             return
 

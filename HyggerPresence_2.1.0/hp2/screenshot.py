@@ -278,34 +278,11 @@ def _process_name(pid):
         return ""
 
 
-_MODIFIER_KEYS = {"shift": 0x10, "ctrl": 0x11, "alt": 0x12}
-
-
-def modifier_down(name):
-    """Physical state of a modifier key, independent of the focused window."""
-    key = _MODIFIER_KEYS.get((name or "").lower())
-    if key is None:
-        return False
-    try:
-        return bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
-    except Exception:
-        return False
-
-
 def foreground_hwnd():
     try:
         return int(ctypes.windll.user32.GetForegroundWindow() or 0)
     except Exception:
         return 0
-
-
-def capture_screen():
-    """The whole composited desktop (what an upscaler draws on screen)."""
-    screen = QGuiApplication.primaryScreen()
-    if screen is None:
-        return None
-    pixmap = screen.grabWindow(0)
-    return None if pixmap.isNull() else pixmap
 
 
 def capture_window():

@@ -3,19 +3,10 @@
 ## 2.1.1 - 2026-10-19
 
 ### Added
-- **Capture area: auto, game window or whole screen.** In the default `Auto`
-  mode the app looks at the foreground window: while an upscaler is showing the
-  game, the whole composited desktop is captured at native resolution; the rest
-  of the time only the game's client area is taken. An upscaler is recognised by
-  the DLL it injects into the game process (Magpie and Lossless Scaling both do
-  this, and they do not own the foreground window), with the process name and a
-  full screen window as fallbacks. Holding a configurable modifier (default Alt,
-  `None` turns it off) while pressing the hotkey forces a whole screen capture
-  for that one shot, which covers upscalers that cannot be detected at all.
-- **Trim black bars.** Captures drop uniform black borders (left/right or
-  top/bottom), which is what upscalers add when the game keeps its original
-  aspect ratio. On by default; a dark scene is left untouched because both sides
-  have to be solid black before anything is cropped.
+- **Trim black bars.** Captures drop uniform black borders (left/right and
+  top/bottom), which is what upscalers such as Magpie add when the game keeps
+  its original aspect ratio. On by default; a dark scene is left untouched
+  because both sides have to be solid black before anything is cropped.
 - **Copy to clipboard.** A switch in Settings -> Screenshots puts every capture
   on the clipboard, ready to paste into Discord or an image editor. Off by
   default.
@@ -26,8 +17,8 @@
   old process deletes on exit, so an updated build could fail with
   "Failed to load Python DLL ... python311.dll". The update itself always
   succeeded; only the automatic restart was affected.
-- Gallery refreshes and clipboard copies now happen on the GUI thread via a
-  signal instead of `QTimer.singleShot` from a worker thread, which never fired.
+- Gallery refreshes and clipboard copies run on the GUI thread through a signal
+  instead of `QTimer.singleShot` from a worker thread, which never fired.
 
 ## 2.1.0 - 2026-10-19
 
