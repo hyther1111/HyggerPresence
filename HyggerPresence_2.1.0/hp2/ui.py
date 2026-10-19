@@ -1903,13 +1903,6 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("Click the field and press a key combination. "
                               "Escape removes it."))
 
-        layout.addSpacing(12)
-        buttons = QHBoxLayout()
-        take = QPushButton(tr("Capture the active window now"))
-        take.clicked.connect(self.window.take_screenshot)
-        buttons.addWidget(take)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
         layout.addStretch(1)
         return page
 
@@ -1932,13 +1925,13 @@ class ScreenshotSettingsMixin:
 
 
 def default_pictures():
-    from PySide6.QtCore import QStandardPaths
-    return QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or str(Path.home())
+    """Pictures/HyggerPresence - the same folder the store uses."""
+    return str(shots.default_base_dir())
 
 
 class ScreenshotPage(Page):
-    COVER = (78, 104)
-    THUMB = (188, 106)
+    COVER = (150, 200)
+    THUMB = (300, 170)
 
     def __init__(self, window):
         super().__init__(window)
@@ -2072,7 +2065,7 @@ class ScreenshotPage(Page):
         card = QFrame()
         card.setObjectName("card")
         card.setCursor(Qt.PointingHandCursor)
-        card.setFixedWidth(self.COVER[0] + 28)
+        card.setFixedWidth(self.COVER[0] + 30)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(6)
@@ -2089,7 +2082,7 @@ class ScreenshotPage(Page):
         name = QLabel(self._library_title(folder))
         name.setObjectName("h3")
         name.setWordWrap(True)
-        name.setFixedHeight(38)
+        name.setFixedHeight(48)
         lay.addWidget(name)
         sub = QLabel(tr("%d Screenshot(s)") % count)
         sub.setObjectName("sub")
@@ -2160,8 +2153,34 @@ class ScreenshotMixin:
         game = self.engine.game or {}
         return (game.get("original") or game.get("title") or "").strip()
 
+    def game_in_foreground(self):
+        """True when the detected game owns the foreground window."""
+        try:
+            from .winapi import get_foreground_pid
+            pid = get_foreground_pid()
+        except Exception:
+            return False
+        if not pid:
+            return False
+        game = self.engine.game
+        if not game:
+            return False
+        try:
+            tracked = set(self.engine.pids_for_game(game) or ())
+        except Exception:
+            tracked = set()
+        if pid in tracked:
+            return True
+        try:
+            from .winapi import get_ancestor_pids
+            return bool(tracked & set(get_ancestor_pids(pid) or ()))
+        except Exception:
+            return False
+
     def take_screenshot(self):
         if not hasattr(self, "shot_store"):
+            return
+        if not self.game_in_foreground():
             return
         self.hide()
 
@@ -2210,18 +2229,20 @@ class ScreenshotMixin:
             def eventFilter(self, obj, event):
                 if event.type() != QEvent.KeyPress:
                     return False
-                QApplication.instance().removeEventFilter(self)
                 if event.key() == Qt.Key_Escape:
                     self.target.setText("")
                     self.target.setPlaceholderText(tr("Not set"))
                     self.window.set_hotkey("")
+                    QApplication.instance().removeEventFilter(self)
                     return True
                 parsed = from_qt(event.key(), event.modifiers())
                 if not parsed:
+                    # keep listening: a bare modifier must not end the capture
                     return True
                 text = describe(parsed[0], parsed[1])
                 self.target.setText(text)
                 self.window.set_hotkey(text)
+                QApplication.instance().removeEventFilter(self)
                 return True
 
         grabber = _Grabber(self, field)

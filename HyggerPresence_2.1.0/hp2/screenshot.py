@@ -52,9 +52,11 @@ def describe_size(rect):
 
 
 def default_base_dir():
+    """Pictures\\HyggerPresence, created on demand."""
     from PySide6.QtCore import QStandardPaths
     folder = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
-    return Path(folder) if folder else Path.home()
+    base = Path(folder) if folder else Path.home()
+    return base / APP_FOLDER
 
 
 class ScreenshotStore:
@@ -65,7 +67,7 @@ class ScreenshotStore:
 
     @property
     def root(self):
-        return self.base_dir / APP_FOLDER
+        return self.base_dir
 
     def folder_for(self, title):
         return self.root / sanitise(title)
