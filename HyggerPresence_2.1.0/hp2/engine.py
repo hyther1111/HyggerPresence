@@ -24,7 +24,7 @@ RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
 KEEPALIVE = 40.0            # Discord drops an activity that is not refreshed; 1.0.x used 55 s
 MIN_PUSH_INTERVAL = 4.2        # 5 updates per 20 s is Discord's limit             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
-STATUS_DEBOUNCE = 2.0        # a new status must hold this long before it is pushed
+STATUS_DEBOUNCE = 0.6        # a new status must hold this long before it is pushed
 
 
 def _clip(value, limit=MAX_LINE):
@@ -800,8 +800,10 @@ class Engine(DetectorMixin):
                            or now - self._last_sent >= KEEPALIVE)
             if should_push and not (status_changed and not (stable or first_push)):
                 if self.presence_enabled:
-                    debug_log("status %s accepted after %.1fs" % (status, now - candidate[1]))
                     sent = self._push(game, status)
+                    if sent:
+                        debug_log("status %s pushed after %.1fs"
+                                  % (status, now - candidate[1]))
                     if sent:
                         self._pushed_identity = identity
                         self._pushed_status = status
