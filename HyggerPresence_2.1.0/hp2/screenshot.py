@@ -278,6 +278,56 @@ def _process_name(pid):
         return ""
 
 
+INJECT_HINTS = ("magpie", "lsfg", "lossless")
+
+
+def process_has_injection(name, hints=INJECT_HINTS):
+    """True when a process has one of the hint DLLs loaded.
+
+    Magpie and similar tools do not own a normal window: they inject a DLL into
+    the game process and draw the upscaled frame from there. A loaded module is
+    therefore the only reliable sign that the game is being scaled right now.
+    """
+    if not name:
+        return False
+    try:
+        import psutil
+    except Exception:
+        return False
+    wanted = name.lower()
+    try:
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                if (proc.info.get("name") or "").lower() != wanted:
+                    continue
+                for path in _module_paths(proc):
+                    lowered = path.lower()
+                    if any(hint in lowered for hint in hints):
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
+
+
+def _module_paths(process):
+    """Loaded module paths of a process, best effort."""
+    try:
+        maps = process.memory_maps()
+    except Exception:
+        return []
+    paths = []
+    for entry in maps:
+        try:
+            path = entry.path
+        except Exception:
+            continue
+        if path:
+            paths.append(path)
+    return paths
+
+
 def upscaler_window():
     """Find a window that an upscaler uses to show the game full screen.
 
