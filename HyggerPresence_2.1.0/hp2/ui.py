@@ -1940,6 +1940,7 @@ class ScreenshotPage(Page):
         super().__init__(window)
         from PySide6.QtWidgets import QScrollArea
         self._view, self._folder, self._shot = "games", "", None
+        self._limit = 60
         self._cards = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
@@ -2025,6 +2026,15 @@ class ScreenshotPage(Page):
         self._escape_filter = _Escape(self)
         QApplication.instance().installEventFilter(self._escape_filter)
 
+        from PySide6.QtCore import QFileSystemWatcher
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_files_changed)
+        self._watcher.directoryChanged.connect(self._on_files_changed)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(350)
+        self._refresh_timer.timeout.connect(self._fill)
+
         self._thumb_jobs = []
         self._thumb_timer = QTimer(self)
         self._thumb_timer.setInterval(8)
@@ -2077,6 +2087,30 @@ class ScreenshotPage(Page):
                     label.setPixmap(pixmap)
             except RuntimeError:
                 pass
+
+    def _on_files_changed(self, *_args):
+        self._watch_paths()
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    def _watch_paths(self):
+        wanted = []
+        store_ = self._shot_store()
+        try:
+            if store_.root.exists():
+                wanted.append(str(store_.root))
+            if self._view == "folder" and self._folder:
+                folder = store_.folder_for(self._folder)
+                if folder.exists():
+                    wanted.append(str(folder))
+        except Exception:
+            pass
+        for path in self._watcher.directories():
+            if path not in wanted:
+                self._watcher.removePath(path)
+        for path in wanted:
+            if path not in self._watcher.directories():
+                self._watcher.addPath(path)
 
     def _shot_store(self):
         return getattr(self.window, "shot_store", None) or shots.ScreenshotStore()
@@ -2153,6 +2187,7 @@ class ScreenshotPage(Page):
 
     def open_folder(self, folder):
         self._view, self._folder, self._shot = "folder", folder, None
+        self._limit = 60
         self._fill()
 
     def open_shot(self, path):
@@ -2172,6 +2207,10 @@ class ScreenshotPage(Page):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _load_more(self):
+        self._limit += 120
+        self._fill()
 
     def refresh(self):
         self._fill()
@@ -2218,20 +2257,26 @@ class ScreenshotPage(Page):
             self.count_label.setText(tr("%d screenshot(s)") % len(paths))
             columns = self._columns(width, self.THUMB)
             self._thumb_jobs = []
-            for index, path in enumerate(paths):
+            shown = paths[:self._limit]
+            for index, path in enumerate(shown):
                 card, art = self._shot_card(path, deferred=True)
                 grid.addWidget(card, index // columns, index % columns)
                 self._cards[str(path)] = True
                 self._thumb_jobs.append((art, path))
+            if len(paths) > self._limit:
+                more = QPushButton(tr("Load more (%d left)") % (len(paths) - self._limit))
+                more.clicked.connect(self._load_more)
+                grid.addWidget(more, len(shown) // columns + 1, 0, 1, min(columns, 4))
             if self._thumb_jobs:
                 self._thumb_timer.start()
             else:
                 self._thumb_timer.stop()
             self.empty.setText(tr("No screenshots"))
             self.empty.setVisible(not paths)
-            grid.setRowStretch(len(paths) // columns + 1, 1)
+            grid.setRowStretch(len(shown) // columns + 2, 1)
 
         self.scroll.setWidget(host)
+        self._watch_paths()
 
     def _fill_single(self):
         path = self._shot
@@ -2340,11 +2385,7 @@ class ScreenshotPage(Page):
 
     def _reveal_shot(self):
         if self._shot and self._shot.exists():
-            try:
-                import subprocess
-                subprocess.Popen(["explorer", "/select,", str(self._shot)])
-            except Exception:
-                pass
+            shots.reveal_in_explorer(self._shot)
 
     def _delete_shot(self):
         if not self._shot:
@@ -2381,17 +2422,7 @@ class ScreenshotMixin:
             Path(folder).mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        target = str(Path(folder))
-        try:
-            os.startfile(target)
-            return
-        except Exception:
-            pass
-        try:
-            import subprocess
-            subprocess.Popen(["explorer", target])
-        except Exception:
-            pass
+        shots.open_folder(folder)
 
     def current_game_title(self):
         game = self.engine.game or {}
@@ -2432,11 +2463,20 @@ class ScreenshotMixin:
         pixmap = shots.capture_window()
         if pixmap is None:
             return
-        try:
-            self.shot_store.save(pixmap, self.current_game_title()
-                                 or shots.FOLDER_FALLBACK)
-        except Exception:
-            return
+        shots.beep()
+        title = self.current_game_title() or shots.FOLDER_FALLBACK
+        store_ = self.shot_store
+
+        def save_in_background():
+            try:
+                store_.save(pixmap, title)
+            except Exception:
+                return
+            QTimer.singleShot(0, self._after_screenshot)
+
+        threading.Thread(target=save_in_background, daemon=True).start()
+
+    def _after_screenshot(self):
         if hasattr(self, "shots_page"):
             self.shots_page.refresh()
 
@@ -2453,11 +2493,44 @@ class ScreenshotMixin:
         manager = getattr(self, "hotkeys", None)
         if manager is None:
             return
-        manager.release()
         spec = ((self.config.get("screenshot") or {}).get("hotkey") or "").strip()
         parsed = hotkey_mod.parse(spec) if spec else None
-        if parsed:
+        if not parsed:
+            manager.release()
+            self._hotkey_timer.stop()
+            return
+        if not manager.is_bound():
+            manager.release()
             manager.bind("window", parsed[0], parsed[1])
+        if not self._hotkey_timer.isActive():
+            self._hotkey_timer.start()
+
+    def _poll_hotkey(self):
+        spec = ((self.config.get("screenshot") or {}).get("hotkey") or "").strip()
+        parsed = hotkey_mod.parse(spec) if spec else None
+        if not parsed:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            modifiers, key = parsed
+            need = []
+            if modifiers & 0x0002:
+                need.append(0x11)
+            if modifiers & 0x0001:
+                need.append(0x12)
+            if modifiers & 0x0004:
+                need.append(0x10)
+            if modifiers & 0x0008:
+                need.append(0x5B)
+            down = bool(user32.GetAsyncKeyState(key) & 0x8000)
+            mods_ok = all(user32.GetAsyncKeyState(vk) & 0x8000 for vk in need) if need else True
+        except Exception:
+            return
+        pressed = down and mods_ok
+        if pressed and not self._hotkey_state:
+            self.take_screenshot()
+        self._hotkey_state = pressed
 
     def start_hotkey_capture(self, field):
         from PySide6.QtWidgets import QApplication
@@ -4220,6 +4293,14 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.shot_store = shots.ScreenshotStore(shot_opts.get("path") or None)
         self.hotkeys = HotkeyManager(self)
         self.hotkeys.triggered.connect(self._on_hotkey)
+        self._hotkey_state = False
+        self._hotkey_timer = QTimer(self)
+        self._hotkey_timer.setInterval(50)
+        self._hotkey_timer.timeout.connect(self._poll_hotkey)
+        self._hotkey_retry = QTimer(self)
+        self._hotkey_retry.setInterval(5000)
+        self._hotkey_retry.timeout.connect(self._register_hotkey)
+        self._hotkey_retry.start()
         self.native_snap = winframe.apply_native_frame(self)
         if self.native_snap:
             self._frame_filter = winframe.NativeFrameFilter(lambda: self)

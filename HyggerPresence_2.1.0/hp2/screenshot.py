@@ -12,6 +12,7 @@ programs never show up in the gallery:
 """
 
 import ctypes
+import os
 import re
 import time
 from pathlib import Path
@@ -171,11 +172,42 @@ def pixmap_crop_hints(pixmap, screen):
     return (1.0,) if abs(factor - 1.0) < 0.01 else (1.0, factor)
 
 
+def foreground_hwnd():
+    try:
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
 def capture_window():
-    """Contents of the foreground window, title bar excluded."""
+    """Contents of the foreground window, title bar excluded.
+
+    Grabbing one window is much cheaper than grabbing the whole screen, but on
+    some setups the frame comes along, so the title bar height is trimmed.
+    """
     screen = QGuiApplication.primaryScreen()
     if screen is None:
         return None
+    hwnd = foreground_hwnd()
+    if hwnd:
+        grabbed = screen.grabWindow(hwnd)
+        if not grabbed.isNull():
+            rect = foreground_client_rect()
+            if rect is not None:
+                try:
+                    user32 = ctypes.windll.user32
+                    frame = _RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(frame))
+                    chrome = max(0, rect.top() - frame.top)
+                    ratio = (grabbed.devicePixelRatio()
+                             or grabbed.width() / max(1, screen.geometry().width()))
+                    top = int(chrome * ratio)
+                    if 0 < top < grabbed.height() // 3:
+                        return grabbed.copy(QRect(0, top, grabbed.width(),
+                                                  grabbed.height() - top))
+                except Exception:
+                    pass
+            return grabbed
     full = screen.grabWindow(0)
     rect = foreground_client_rect()
     if full.isNull() or rect is None:
@@ -186,3 +218,83 @@ def capture_window():
         if candidate.width() >= 4 and candidate.height() >= 4:
             return full.copy(candidate)
     return None
+
+
+def beep():
+    """Audible confirmation that a screenshot was taken."""
+    try:
+        import winsound
+        winsound.PlaySound("SystemAsterisk",
+                           winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        return True
+    except Exception:
+        pass
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
+        return True
+    except Exception:
+        return False
+
+
+def reveal_in_explorer(path):
+    """Show a file selected in Explorer, in front."""
+    import subprocess
+    try:
+        subprocess.Popen(["explorer", "/select,", str(path)])
+    except Exception:
+        return False
+    _raise_explorer(Path(path).parent.name)
+    return True
+
+
+def open_folder(path):
+    """Open a folder in Explorer, in front."""
+    import subprocess
+    try:
+        os.startfile(str(path))
+    except Exception:
+        try:
+            subprocess.Popen(["explorer", str(path)])
+        except Exception:
+            return False
+    _raise_explorer(Path(path).name)
+    return True
+
+
+def _raise_explorer(title_part):
+    """Explorer sometimes opens behind; bring the matching window forward."""
+    import threading
+    import time
+
+    def worker():
+        try:
+            user32 = ctypes.windll.user32
+        except Exception:
+            return
+        for _ in range(30):
+            time.sleep(0.1)
+            found = []
+            prototype = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+            def callback(hwnd, _param):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if not length:
+                    return True
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                if title_part and title_part.lower() in buffer.value.lower():
+                    found.append(hwnd)
+                    return False
+                return True
+
+            try:
+                user32.EnumWindows(prototype(callback), 0)
+            except Exception:
+                return
+            if found:
+                user32.ShowWindow(found[0], 9)
+                user32.SetForegroundWindow(found[0])
+                return
+
+    threading.Thread(target=worker, daemon=True).start()
