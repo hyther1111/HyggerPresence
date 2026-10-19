@@ -2026,6 +2026,9 @@ class ScreenshotPage(Page):
         self._escape_filter = _Escape(self)
         QApplication.instance().installEventFilter(self._escape_filter)
 
+        self._selection = set()
+        self._rubber = None
+        self._rubber_origin = None
         from PySide6.QtCore import QFileSystemWatcher
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._on_files_changed)
@@ -2094,15 +2097,18 @@ class ScreenshotPage(Page):
             self._refresh_timer.start()
 
     def _watch_paths(self):
+        """Watch the root and every game folder, so counts refresh live."""
         wanted = []
         store_ = self._shot_store()
         try:
-            if store_.root.exists():
-                wanted.append(str(store_.root))
-            if self._view == "folder" and self._folder:
-                folder = store_.folder_for(self._folder)
-                if folder.exists():
-                    wanted.append(str(folder))
+            root = store_.root
+            if root.exists():
+                wanted.append(str(root))
+                for index, sub in enumerate(sorted(root.iterdir())):
+                    if index >= 40:
+                        break
+                    if sub.is_dir():
+                        wanted.append(str(sub))
         except Exception:
             pass
         for path in self._watcher.directories():
@@ -2208,6 +2214,115 @@ class ScreenshotPage(Page):
             return
         super().keyPressEvent(event)
 
+    # ---------------------------------------------------------------- selection
+    def _card_pressed(self, event, path):
+        from PySide6.QtWidgets import QApplication
+        if event.button() == Qt.RightButton:
+            if path not in self._selection:
+                self._selection = {str(path)}
+                self._paint_selection()
+            self._show_menu(event)
+            return
+        if event.button() != Qt.LeftButton:
+            return
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            if path in self._selection:
+                self._selection.discard(path)
+            else:
+                self._selection.add(path)
+        else:
+            self._selection = {str(path)}
+        self._paint_selection()
+
+    def _paint_selection(self):
+        for key, card in self._cards.items():
+            if not hasattr(card, "setProperty"):
+                continue
+            card.setProperty("selected", "true" if key in self._selection else "false")
+            card.style().unpolish(card)
+            card.style().polish(card)
+
+    def _apply_selection_style(self):
+        style = self.styleSheet()
+        if "card[selected=\"true\"]" in style:
+            return
+        self.setStyleSheet(style + """
+QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
+""")
+
+    def select_all(self):
+        if self._view != "folder":
+            return
+        self._selection = set(self._cards.keys())
+        self._paint_selection()
+
+    def _show_menu(self, event):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        delete = menu.addAction(tr("Delete"))
+        action = menu.exec(event.globalPosition().toPoint())
+        if action is delete:
+            self.delete_selection()
+
+    def delete_selection(self):
+        paths = [Path(p) for p in self._selection if Path(p).exists()]
+        if not paths:
+            return
+        if len(paths) > 1:
+            from PySide6.QtWidgets import QMessageBox
+            answer = QMessageBox.question(
+                self, tr("Delete screenshots"),
+                tr("Delete %d screenshots?") % len(paths))
+            if answer != QMessageBox.Yes:
+                return
+        for path in paths:
+            shots.ScreenshotStore.delete(path)
+        self._selection = set()
+        self._fill()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.go_back()
+            event.accept()
+            return
+        if event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.select_all()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Delete:
+            self.delete_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._view == "folder" and event.button() == Qt.LeftButton:
+            self._rubber_origin = event.position().toPoint()
+            self._selection = set()
+            self._paint_selection()
+
+    def mouseMoveEvent(self, event):
+        if self._rubber_origin is None:
+            return
+        from PySide6.QtWidgets import QRubberBand
+        if self._rubber is None:
+            self._rubber = QRubberBand(QRubberBand.Rectangle, self)
+        rect = QRect(self._rubber_origin, event.position().toPoint()).normalized()
+        self._rubber.setGeometry(rect)
+        self._rubber.show()
+        for key, card in self._cards.items():
+            if not hasattr(card, "geometry"):
+                continue
+            area = QRect(card.mapTo(self, QPoint(0, 0)), card.size())
+            if rect.intersects(area):
+                self._selection.add(key)
+        self._paint_selection()
+
+    def mouseReleaseEvent(self, event):
+        if self._rubber is not None:
+            self._rubber.hide()
+        self._rubber_origin = None
+
     def _load_more(self):
         self._limit += 120
         self._fill()
@@ -2245,9 +2360,9 @@ class ScreenshotPage(Page):
             self.count_label.setText(tr("%d screenshot(s)") % sum(c for _f, c in games))
             columns = self._columns(width, self.COVER)
             for index, (folder, count) in enumerate(games):
-                grid.addWidget(self._game_card(folder, count),
-                               index // columns, index % columns)
-                self._cards[folder] = True
+                card = self._game_card(folder, count)
+                grid.addWidget(card, index // columns, index % columns)
+                self._cards[folder] = card
             self.empty.setText(tr("No screenshots"))
             self.empty.setVisible(not games)
             grid.setRowStretch(len(games) // columns + 1, 1)
@@ -2261,7 +2376,7 @@ class ScreenshotPage(Page):
             for index, path in enumerate(shown):
                 card, art = self._shot_card(path, deferred=True)
                 grid.addWidget(card, index // columns, index % columns)
-                self._cards[str(path)] = True
+                self._cards[str(path)] = card
                 self._thumb_jobs.append((art, path))
             if len(paths) > self._limit:
                 more = QPushButton(tr("Load more (%d left)") % (len(paths) - self._limit))
@@ -2353,6 +2468,8 @@ class ScreenshotPage(Page):
         name.setWordWrap(True)
         lay.addWidget(name)
         card.mouseDoubleClickEvent = lambda _e, p=path: self.open_shot(p)
+        card.mousePressEvent = lambda e, p=path: self._card_pressed(e, p)
+        card.setProperty("selected", "false")
         return card, art
 
     # ------------------------------------------------------------------ actions

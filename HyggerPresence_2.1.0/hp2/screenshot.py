@@ -220,18 +220,19 @@ def capture_window():
     return None
 
 
+_last_beep = [0.0]
+
+
 def beep():
-    """Audible confirmation that a screenshot was taken."""
+    """Short confirmation sound. Alias sounds queue up, so use MessageBeep."""
+    import time as _time
+    now = _time.time()
+    if now - _last_beep[0] < 0.12:          # spamming must not queue up sounds
+        return False
+    _last_beep[0] = now
     try:
         import winsound
-        winsound.PlaySound("SystemAsterisk",
-                           winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-        return True
-    except Exception:
-        pass
-    try:
-        import winsound
-        winsound.MessageBeep(winsound.MB_OK)
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
         return True
     except Exception:
         return False
@@ -262,6 +263,14 @@ def open_folder(path):
     return True
 
 
+def _is_explorer(pid):
+    try:
+        import psutil
+        return psutil.Process(pid).name().lower().startswith("explorer")
+    except Exception:
+        return False
+
+
 def _raise_explorer(title_part):
     """Explorer sometimes opens behind; bring the matching window forward."""
     import threading
@@ -280,6 +289,11 @@ def _raise_explorer(title_part):
             def callback(hwnd, _param):
                 length = user32.GetWindowTextLengthW(hwnd)
                 if not length:
+                    return True
+                # only Explorer: a game window carries the same title
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if not _is_explorer(pid.value):
                     return True
                 buffer = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buffer, length + 1)
