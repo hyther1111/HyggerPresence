@@ -22,7 +22,7 @@ from .winapi import wait_for_process_exit
 MAX_LINE = 128
 RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
-KEEPALIVE = 55.0
+KEEPALIVE = 40.0            # Discord drops an activity that is not refreshed; 1.0.x used 55 s
 MIN_PUSH_INTERVAL = 4.2        # 5 updates per 20 s is Discord's limit             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
 STATUS_DEBOUNCE = 2.0        # a new status must hold this long before it is pushed
 
@@ -677,22 +677,24 @@ class Engine(DetectorMixin):
         """Reconnect and republish when the card went stale - never on the UI thread."""
         if not self.presence_enabled or self.game is None or self.status is None:
             return False
-        if time.time() - self._last_sent < 30 or self._watchdog_busy:
+        if time.time() - self._last_sent < KEEPALIVE + 15 or self._watchdog_busy:
             return False
         self._watchdog_busy = True
         self._submit(self._watchdog_job)
         return True
 
     def _watchdog_job(self):
+        """Republish without dropping a healthy connection.
+
+        This used to close the socket first, so the card disappeared and came
+        back every time the watchdog ran (~30 s) - the "disconnect" the user saw.
+        """
         try:
-            with self._rpc_lock:
-                if self.rpc is not None:
-                    try:
-                        self.rpc.close()
-                    except Exception:
-                        pass
-                self.rpc = None
-            self._last_sent = 0.0
+            debug_log("watchdog: last_sent %.0fs ago, rpc=%s"
+                      % (time.time() - self._last_sent,
+                         "open" if self.rpc else "closed"))
+            if self.rpc is None:
+                self._last_sent = 0.0
             if self.game is not None and self.status is not None:
                 self._push(self.game, self.status)
         finally:
