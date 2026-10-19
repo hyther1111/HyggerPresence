@@ -47,3 +47,4 @@ COPY/
 backup-*/
 # the released 2.0.0 snapshot is a git tag
 HyggerPresence_2.0.0/
+HyggerPresence_2.2.0/
