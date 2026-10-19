@@ -221,6 +221,7 @@ def capture_window():
 
 
 SHUTTER_NAMES = ("screenshot.wav", "shutter.wav")
+LONG_FORMATS = (".mp3", ".wma", ".m4a", ".flac", ".ogg", ".aac", ".aiff", ".mid")
 
 
 def sound_file(chosen=""):
@@ -240,6 +241,27 @@ def sound_file(chosen=""):
     return None
 
 
+def _play_media(path):
+    """MCI handles mp3/wma/... without pulling in QtMultimedia."""
+    try:
+        mci = ctypes.windll.winmm.mciSendStringW
+    except Exception:
+        return False
+    alias = "hp_sound"
+    try:
+        mci('close %s' % alias, None, 0, None)
+    except Exception:
+        pass
+    buffer = pathlib_path = str(path)
+    try:
+        if mci('open "%s" type mpegvideo alias %s' % (buffer, alias), None, 0, None) != 0:
+            if mci('open "%s" alias %s' % (buffer, alias), None, 0, None) != 0:
+                return False
+        return mci('play %s from 0' % alias, None, 0, None) == 0
+    except Exception:
+        return False
+
+
 def beep(sound_path=""):
     """Play the shutter sound immediately, cutting off the previous one."""
     try:
@@ -247,6 +269,9 @@ def beep(sound_path=""):
     except Exception:
         return False
     custom = sound_file(sound_path)
+    if custom is not None and custom.suffix.lower() not in (".wav", ""):
+        if _play_media(custom):
+            return True
     if custom is not None:
         try:
             winsound.PlaySound(str(custom),

@@ -1995,6 +1995,10 @@ class ScreenshotPage(Page):
         self.search.textChanged.connect(self._fill)
         self.search.setFixedWidth(220)
         head.addWidget(self.search)
+        self.open_folder_button = QPushButton(tr("Open folder"))
+        self.open_folder_button.setFixedWidth(120)
+        self.open_folder_button.clicked.connect(self._open_current_folder)
+        head.addWidget(self.open_folder_button)
         outer.addLayout(head)
 
         self.scroll = QScrollArea()
@@ -2257,10 +2261,10 @@ class ScreenshotPage(Page):
     def _card_pressed(self, event, path):
         from PySide6.QtWidgets import QApplication
         if event.button() == Qt.RightButton:
-            if path not in self._selection:
+            if str(path) not in self._selection:
                 self._selection = {str(path)}
                 self._paint_selection()
-            self._show_menu(event)
+            self._show_menu(position=event.globalPosition().toPoint())
             return
         if event.button() != Qt.LeftButton:
             return
@@ -2272,6 +2276,22 @@ class ScreenshotPage(Page):
                 self._selection.add(key)
         else:
             self._selection = {key}
+        self._paint_selection()
+
+    def _game_pressed(self, event, folder):
+        if event.button() == Qt.RightButton:
+            shots.open_folder(self._shot_store().folder_for(folder))
+            return
+        if event.button() != Qt.LeftButton:
+            return
+        from PySide6.QtWidgets import QApplication
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            if folder in self._selection:
+                self._selection.discard(folder)
+            else:
+                self._selection.add(folder)
+        else:
+            self._selection = {folder}
         self._paint_selection()
 
     def _paint_selection(self):
@@ -2300,14 +2320,48 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         from PySide6.QtWidgets import QMenu
         from PySide6.QtGui import QCursor
         menu = QMenu(self)
-        delete = menu.addAction(tr("Delete") + (" (%d)" % len(self._selection)
-                                                if self._selection else ""))
-        delete.setEnabled(bool(self._selection))
+        count = len(self._selection)
+        single = count == 1
+        copy = menu.addAction(tr("Copy"))
+        copy.setEnabled(count >= 1)
+        open_action = menu.addAction(tr("Open"))
+        open_action.setEnabled(single)
+        reveal = menu.addAction(tr("Show in folder"))
+        reveal.setEnabled(single)
+        menu.addSeparator()
+        delete = menu.addAction(tr("Delete") + (" (%d)" % count if count else ""))
+        delete.setEnabled(count >= 1)
         where = position or (event.globalPosition().toPoint() if event is not None
                              else QCursor.pos())
         action = menu.exec(where)
+        if action is None:
+            return
         if action is delete:
             self.delete_selection()
+        elif action is copy:
+            self.copy_selection()
+        elif single:
+            path = Path(next(iter(self._selection)))
+            if action is open_action:
+                self._shot = path
+                self._open_shot()
+            elif action is reveal:
+                shots.reveal_in_explorer(path)
+
+    def copy_selection(self):
+        """Copy the selected images; more than one goes to the clipboard as files."""
+        paths = [Path(p) for p in self._selection if Path(p).exists()]
+        if not paths:
+            return
+        from PySide6.QtCore import QMimeData, QUrl
+        from PySide6.QtWidgets import QApplication
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+        if len(paths) == 1:
+            image = QImage(str(paths[0]))
+            if not image.isNull():
+                mime.setImageData(image)
+        QApplication.clipboard().setMimeData(mime)
 
     def contextMenuEvent(self, event):
         if self._view == "folder":
@@ -2493,6 +2547,8 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         sub.setObjectName("sub")
         lay.addWidget(sub)
         card.mouseDoubleClickEvent = lambda _e, f=folder: self.open_folder(f)
+        card.mousePressEvent = lambda e, f=folder: self._game_pressed(e, f)
+        card.setProperty("selected", "false")
         return card
 
     def _shot_card(self, path, deferred=False):
@@ -2525,6 +2581,17 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         return card, art
 
     # ------------------------------------------------------------------ actions
+    def _open_current_folder(self):
+        store_ = self._shot_store()
+        if self._view == "folder" and self._folder:
+            shots.open_folder(store_.folder_for(self._folder))
+        else:
+            try:
+                store_.root.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            shots.open_folder(store_.root)
+
     def _copy_shot(self):
         if self._shot and self._shot.exists():
             from PySide6.QtWidgets import QApplication
@@ -2801,18 +2868,47 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             explanation = parts[1].strip() if len(parts) > 1 else translated
             rows.append(
                 '<div style="margin-bottom:7px;">'
-                '<span style="font-family:Consolas,\'Courier New\',monospace;'
-                ' background:%s; padding:2px 6px; border-radius:4px; color:%s;">'
-                '%s</span>&nbsp;&nbsp;<span style="color:%s;">%s</span></div>'
-                % (theme["surface2"], theme["text"], token,
+                '<a href="%s" style="font-family:Consolas,\'Courier New\',monospace;'
+                ' background:%s; padding:2px 6px; border-radius:4px; color:%s;'
+                ' text-decoration:none;">%s</a>&nbsp;&nbsp;'
+                '<span style="color:%s;">%s</span></div>'
+                % (token, theme["surface2"], theme["text"], token,
                    theme["subtext"], explanation))
-        label = QLabel("".join(rows))
-        label.setTextFormat(Qt.RichText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(label)
+        self._variables_label = QLabel("".join(rows))
+        self._variables_label.setTextFormat(Qt.RichText)
+        self._variables_label.setWordWrap(True)
+        self._variables_label.setTextInteractionFlags(Qt.TextSelectableByMouse
+                                                      | Qt.LinksAccessibleByMouse)
+        self._variables_label.setOpenExternalLinks(False)
+        self._variables_label.linkActivated.connect(self._copy_token)
+        layout.addWidget(self._variables_label)
         layout.addStretch(1)
         return page
+
+    def _copy_token(self, token):
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(token)
+        self.window.flash_status(tr("Copied %s") % token)
+
+    def refresh_variables(self):
+        if not hasattr(self, "_variables_label"):
+            return
+        from PySide6.QtWidgets import QApplication
+        theme = self.window.palette
+        rows = []
+        for token, description in self.VARIABLES:
+            translated = tr(description)
+            parts = translated.split("\u2013", 1)
+            explanation = parts[1].strip() if len(parts) > 1 else translated
+            rows.append(
+                '<div style="margin-bottom:7px;">'
+                '<a href="%s" style="font-family:Consolas,\'Courier New\',monospace;'
+                ' background:%s; padding:2px 6px; border-radius:4px; color:%s;'
+                ' text-decoration:none;">%s</a>&nbsp;&nbsp;'
+                '<span style="color:%s;">%s</span></div>'
+                % (token, theme["surface2"], theme["text"], token,
+                   theme["subtext"], explanation))
+        self._variables_label.setText("".join(rows))
 
     @staticmethod
     def _help(parent, text):
@@ -4858,6 +4954,14 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self.stats_page.refresh()
             self.stats_page.refresh()
 
+    def flash_status(self, text, seconds=2.5):
+        """Temporary message in the status bar."""
+        try:
+            self.status_text.setText(text)
+            QTimer.singleShot(int(seconds * 1000), self._refresh_status)
+        except Exception:
+            pass
+
     def toggle_theme(self):
         self.palette = LIGHT if self.palette is DARK else DARK
         self.apply_theme()
@@ -4873,6 +4977,10 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.title_line.update()
         self.title_frame.update()
         self.title_bar.update()
+        if hasattr(self, "shots_page"):
+            self.shots_page._fill()
+        if hasattr(self, "settings_page"):
+            self.settings_page.refresh_variables()
         moon = self.palette is DARK
         self.title_bar.theme_button.setIcon(
             paint_moon(hole=self.palette["bg"]) if moon
