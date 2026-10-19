@@ -114,3 +114,50 @@ def resize_foreground(width, height):
 
 
 PRESETS = ((1280, 720), (1366, 768), (1600, 900), (1920, 1080), (2560, 1440))
+
+
+def list_windows():
+    """Visible top level windows: [(hwnd, title, width, height, process)]."""
+    import os
+    user32 = _user32()
+    if user32 is None:
+        return []
+    own = os.getpid()
+    found = []
+    prototype = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def callback(hwnd, _param):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own:
+                return True
+            width, height = client_size(hwnd)
+            if width < 320 or height < 240:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value.strip()
+            if not title:
+                return True
+            try:
+                import psutil
+                name = psutil.Process(pid.value).name()
+            except Exception:
+                name = ""
+            found.append((int(hwnd), title, width, height, name))
+        except Exception:
+            return True
+        return True
+
+    try:
+        user32.EnumWindows(prototype(callback), 0)
+    except Exception:
+        return []
+    found.sort(key=lambda item: item[1].lower())
+    return found

@@ -1891,18 +1891,19 @@ class ScreenshotSettingsMixin:
     # ------------------------------------------------------------- tools tab
     def _build_tools(self):
         page, layout = self._page()
-        layout.addWidget(QLabel(tr("Window size")))
-        self.tool_target = QLabel(tr("Bring the game to the front, then press "
-                                     "Refresh."))
+        layout.addWidget(QLabel(tr("Target window")))
+        picker = QHBoxLayout()
+        self.tool_window = QComboBox()
+        self.tool_window.currentIndexChanged.connect(self._tool_window_changed)
+        picker.addWidget(self.tool_window, 1)
+        refresh = QPushButton(tr("Refresh"))
+        refresh.clicked.connect(self._tool_refresh)
+        picker.addWidget(refresh)
+        layout.addLayout(picker)
+        self.tool_target = QLabel("")
         self.tool_target.setObjectName("sub")
         self.tool_target.setWordWrap(True)
         layout.addWidget(self.tool_target)
-        refresh = QPushButton(tr("Refresh"))
-        refresh.clicked.connect(self._tool_refresh)
-        row = QHBoxLayout()
-        row.addWidget(refresh)
-        row.addStretch(1)
-        layout.addLayout(row)
 
         layout.addSpacing(10)
         layout.addWidget(QLabel(tr("Resolution")))
@@ -1933,25 +1934,47 @@ class ScreenshotSettingsMixin:
         self.tool_status.setObjectName("sub")
         self.tool_status.setWordWrap(True)
         layout.addWidget(self.tool_status)
-        self._help(layout, tr("Exclusive full screen games have to be switched "
-                             "to a window first. A game that enforces its own "
-                             "size may snap back immediately."))
+        self._help(layout, tr("Pick the game window from the list (press "
+                             "Refresh if it is not there yet). Exclusive full "
+                             "screen games have to be switched to a window "
+                             "first; a game that enforces its own size may snap "
+                             "back immediately."))
         layout.addStretch(1)
         self._tool_refresh()
         return page
 
     def _tool_refresh(self):
-        found = windowtool.foreground_window()
-        if found is None:
-            self.tool_target.setText(tr("No window in the foreground."))
+        """Fill the list with every window that can be resized."""
+        current = self.tool_window.currentData()
+        self.tool_window.blockSignals(True)
+        self.tool_window.clear()
+        windows = windowtool.list_windows()
+        for hwnd, title, width, height, name in windows:
+            label = "%s  (%dx%d%s)" % (title[:60], width, height,
+                                       ", " + name if name else "")
+            self.tool_window.addItem(label, (hwnd, width, height))
+        self.tool_window.blockSignals(False)
+        if not windows:
+            self.tool_target.setText(tr("No window found."))
             self._tool_hwnd = 0
             return
-        hwnd, title, width, height = found
+        for index in range(self.tool_window.count()):
+            payload = self.tool_window.itemData(index)
+            if current and payload and payload[0] == current[0]:
+                self.tool_window.setCurrentIndex(index)
+                break
+        self._tool_window_changed(self.tool_window.currentIndex())
+
+    def _tool_window_changed(self, _index):
+        payload = self.tool_window.currentData()
+        if not payload:
+            self._tool_hwnd = 0
+            return
+        hwnd, width, height = payload
         self._tool_hwnd = hwnd
-        self.tool_target.setText("%s  -  %dx%d" % (title or "?", width, height))
-        if width and height:
-            self.tool_width.setValue(max(320, min(7680, width)))
-            self.tool_height.setValue(max(240, min(4320, height)))
+        self.tool_target.setText("%dx%d" % (width, height))
+        self.tool_width.setValue(max(320, min(7680, width)))
+        self.tool_height.setValue(max(240, min(4320, height)))
 
     def _tool_preset_changed(self, _index):
         payload = self.tool_preset.currentData()
