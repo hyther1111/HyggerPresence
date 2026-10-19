@@ -1942,8 +1942,10 @@ class ScreenshotSettingsMixin:
         layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Capture area")))
         self.shot_mode = QComboBox()
-        self.shot_mode.addItems([tr("Game window"), tr("Whole screen")])
-        self.shot_mode.setCurrentIndex(1 if (opts.get("mode") or "window") == "screen" else 0)
+        self.shot_mode.addItems([tr("Auto (upscaler aware)"), tr("Game window"),
+                                 tr("Whole screen")])
+        current = opts.get("mode") or "auto"
+        self.shot_mode.setCurrentIndex({"window": 1, "screen": 2}.get(current, 0))
         self.shot_mode.currentIndexChanged.connect(self._mode_changed)
         layout.addWidget(self.shot_mode)
         self._help(layout, tr("Whole screen grabs everything, which is what you "
@@ -1967,7 +1969,7 @@ class ScreenshotSettingsMixin:
         return page
 
     def _mode_changed(self, index):
-        mode = "screen" if index == 1 else "window"
+        mode = {1: "window", 2: "screen"}.get(index, "auto")
         opts = self.window.config.setdefault("screenshot", {})
         opts["mode"] = mode
         store.update_config_section("screenshot", {"mode": mode})
@@ -2803,17 +2805,24 @@ class ScreenshotMixin:
             return
         self._last_capture_at = now
         capture_opts = (self.config.get("screenshot") or {})
-        whole_screen = (capture_opts.get("mode") or "window") == "screen"
+        mode = (capture_opts.get("mode") or "auto")
+        if mode == "screen":
+            whole_screen = True
+        elif mode == "window":
+            whole_screen = False
+        else:
+            # Auto: an upscaler showing the game owns the foreground window
+            whole_screen = shots.foreground_is_upscaler()
         if whole_screen:
-            # an upscaler owns the foreground window, so only require a game
+            # upscalers draw in their own window, the game itself may be tiny
             if not self.engine.game:
                 return
-        elif not self.game_in_foreground():
+            pixmap = shots.capture_screen()
+            if pixmap is None:
+                return
+            self._deliver_capture(pixmap, capture_opts)
             return
-        if whole_screen:
-            # our own window must not end up in the picture
-            self.hide()
-            QTimer.singleShot(140, lambda o=capture_opts: self._finish_screen_capture(o))
+        if not self.game_in_foreground():
             return
 
         # No delay: the window does not move away, and a delayed grab used to
@@ -2832,13 +2841,6 @@ class ScreenshotMixin:
                              (_t.time() - _started) * 1000.0))
             except Exception:
                 pass
-        if pixmap is None:
-            return
-        self._deliver_capture(pixmap, opts)
-
-    def _finish_screen_capture(self, opts):
-        pixmap = shots.capture_screen()
-        self.show()
         if pixmap is None:
             return
         self._deliver_capture(pixmap, opts)

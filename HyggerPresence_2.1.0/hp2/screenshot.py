@@ -242,6 +242,30 @@ def pixmap_crop_hints(pixmap, screen):
     return (1.0,) if abs(factor - 1.0) < 0.01 else (1.0, factor)
 
 
+UPSCALERS = ("magpie", "lossless scaling", "lsfg")
+
+
+def foreground_process_name():
+    """Executable name of the foreground window's process, lower case."""
+    hwnd = foreground_hwnd()
+    if not hwnd:
+        return ""
+    try:
+        user32 = ctypes.windll.user32
+        pid = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        import psutil
+        return psutil.Process(pid.value).name().lower()
+    except Exception:
+        return ""
+
+
+def foreground_is_upscaler():
+    """True while an upscaler window is the one on screen."""
+    name = foreground_process_name()
+    return any(key in name for key in UPSCALERS)
+
+
 def foreground_hwnd():
     try:
         return int(ctypes.windll.user32.GetForegroundWindow() or 0)
