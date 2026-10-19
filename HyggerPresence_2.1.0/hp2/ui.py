@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QSizeGrip, QStackedWidget,
-                               QListWidget, QListWidgetItem, QSpinBox, QTabWidget,
+                               QListWidget, QListWidgetItem, QTabWidget,
                                QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -35,7 +35,6 @@ from . import i18n
 from .i18n import LANGUAGES, set_language, tr
 from .core import debug_log
 from . import screenshot as shots
-from . import windowtool
 from .hotkey import HotkeyManager, describe, from_qt
 from . import hotkey as hotkey_mod
 from .stats import StatsStore
@@ -1222,7 +1221,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.2.0"          # one inset for the title bar, the sidebar and the status bar
+APP_VERSION = "2.1.0"          # one inset for the title bar, the sidebar and the status bar
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -1888,115 +1887,6 @@ class StatsPage(Page):
 
 # ===================================================================== screenshots
 class ScreenshotSettingsMixin:
-    # ------------------------------------------------------------- tools tab
-    def _build_tools(self):
-        page, layout = self._page()
-        layout.addWidget(QLabel(tr("Target window")))
-        picker = QHBoxLayout()
-        self.tool_window = QComboBox()
-        self.tool_window.currentIndexChanged.connect(self._tool_window_changed)
-        picker.addWidget(self.tool_window, 1)
-        refresh = QPushButton(tr("Refresh"))
-        refresh.clicked.connect(self._tool_refresh)
-        picker.addWidget(refresh)
-        layout.addLayout(picker)
-        self.tool_target = QLabel("")
-        self.tool_target.setObjectName("sub")
-        self.tool_target.setWordWrap(True)
-        layout.addWidget(self.tool_target)
-
-        layout.addSpacing(10)
-        layout.addWidget(QLabel(tr("Resolution")))
-        self.tool_preset = QComboBox()
-        self.tool_preset.addItem(tr("Custom"), (0, 0))
-        for width, height in windowtool.PRESETS:
-            self.tool_preset.addItem("%d x %d" % (width, height), (width, height))
-        self.tool_preset.currentIndexChanged.connect(self._tool_preset_changed)
-        layout.addWidget(self.tool_preset)
-
-        size_row = QHBoxLayout()
-        self.tool_width = QSpinBox()
-        self.tool_width.setRange(320, 7680)
-        self.tool_width.setValue(1920)
-        self.tool_height = QSpinBox()
-        self.tool_height.setRange(240, 4320)
-        self.tool_height.setValue(1080)
-        size_row.addWidget(self.tool_width)
-        size_row.addWidget(QLabel("x"))
-        size_row.addWidget(self.tool_height)
-        size_row.addStretch(1)
-        apply_button = QPushButton(tr("Apply"))
-        apply_button.clicked.connect(self._tool_apply)
-        size_row.addWidget(apply_button)
-        layout.addLayout(size_row)
-
-        self.tool_status = QLabel("")
-        self.tool_status.setObjectName("sub")
-        self.tool_status.setWordWrap(True)
-        layout.addWidget(self.tool_status)
-        self._help(layout, tr("Pick the game window from the list (press "
-                             "Refresh if it is not there yet). Exclusive full "
-                             "screen games have to be switched to a window "
-                             "first; a game that enforces its own size may snap "
-                             "back immediately."))
-        layout.addStretch(1)
-        self._tool_refresh()
-        return page
-
-    def _tool_refresh(self):
-        """Fill the list with every window that can be resized."""
-        current = self.tool_window.currentData()
-        self.tool_window.blockSignals(True)
-        self.tool_window.clear()
-        windows = windowtool.list_windows()
-        for hwnd, title, width, height, name in windows:
-            label = "%s  (%dx%d%s)" % (title[:60], width, height,
-                                       ", " + name if name else "")
-            self.tool_window.addItem(label, (hwnd, width, height))
-        self.tool_window.blockSignals(False)
-        if not windows:
-            self.tool_target.setText(tr("No window found."))
-            self._tool_hwnd = 0
-            return
-        for index in range(self.tool_window.count()):
-            payload = self.tool_window.itemData(index)
-            if current and payload and payload[0] == current[0]:
-                self.tool_window.setCurrentIndex(index)
-                break
-        self._tool_window_changed(self.tool_window.currentIndex())
-
-    def _tool_window_changed(self, _index):
-        payload = self.tool_window.currentData()
-        if not payload:
-            self._tool_hwnd = 0
-            return
-        hwnd, width, height = payload
-        self._tool_hwnd = hwnd
-        self.tool_target.setText("%dx%d" % (width, height))
-        self.tool_width.setValue(max(320, min(7680, width)))
-        self.tool_height.setValue(max(240, min(4320, height)))
-
-    def _tool_preset_changed(self, _index):
-        payload = self.tool_preset.currentData()
-        if not payload or not payload[0]:
-            return
-        self.tool_width.setValue(payload[0])
-        self.tool_height.setValue(payload[1])
-
-    def _tool_apply(self):
-        hwnd = getattr(self, "_tool_hwnd", 0)
-        if not hwnd:
-            self._tool_refresh()
-            hwnd = getattr(self, "_tool_hwnd", 0)
-        if not hwnd:
-            self.tool_status.setText(tr("No window in the foreground."))
-            return
-        ok, message = windowtool.resize_client(hwnd, self.tool_width.value(),
-                                               self.tool_height.value())
-        self.tool_status.setText(message if ok else tr("Failed: %s") % message)
-        if ok:
-            self._tool_refresh()
-
     def _build_screenshot(self):
         page, layout = self._page()
         opts = self.window.config.setdefault("screenshot", {})
@@ -2048,32 +1938,8 @@ class ScreenshotSettingsMixin:
         sound_row.addWidget(clear_sound)
         layout.addLayout(sound_row)
         self._help(layout, tr("WAV file played after each screenshot."))
-
-        layout.addSpacing(12)
-        self.shot_trim = QCheckBox(tr("Trim black bars left and right"))
-        self.shot_trim.setChecked(bool(opts.get("trim_bars", True)))
-        self.shot_trim.toggled.connect(self._trim_changed)
-        layout.addWidget(self.shot_trim)
-        self._help(layout, tr("Useful for upscalers that add bars to keep the "
-                              "original aspect ratio."))
-
-        self.shot_copy = QCheckBox(tr("Copy the screenshot to the clipboard"))
-        self.shot_copy.setChecked(bool(opts.get("copy_clipboard", False)))
-        self.shot_copy.toggled.connect(self._copy_changed)
-        layout.addWidget(self.shot_copy)
-        self._help(layout, tr("Paste straight into Discord or an image editor."))
         layout.addStretch(1)
         return page
-
-    def _trim_changed(self, enabled):
-        opts = self.window.config.setdefault("screenshot", {})
-        opts["trim_bars"] = bool(enabled)
-        store.update_config_section("screenshot", {"trim_bars": bool(enabled)})
-
-    def _copy_changed(self, enabled):
-        opts = self.window.config.setdefault("screenshot", {})
-        opts["copy_clipboard"] = bool(enabled)
-        store.update_config_section("screenshot", {"copy_clipboard": bool(enabled)})
 
     def _pick_sound(self):
         from PySide6.QtWidgets import QFileDialog
@@ -2109,12 +1975,6 @@ class ScreenshotSettingsMixin:
 def default_pictures():
     """Pictures/HyggerPresence - the same folder the store uses."""
     return str(shots.default_base_dir())
-
-
-class ShotSignals(QObject):
-    """Carries a finished capture back to the GUI thread."""
-
-    finished = Signal(object)
 
 
 class ScreenshotPage(Page):
@@ -2895,14 +2755,12 @@ class ScreenshotMixin:
                       % (now - getattr(self, "_last_capture_at", 0.0)))
             return
         self._last_capture_at = now
-        capture_opts = (self.config.get("screenshot") or {})
         if not self.game_in_foreground():
             return
 
         # No delay: the window does not move away, and a delayed grab used to
         # capture whatever had the focus by then.
         self._capturing = True
-        opts = (self.config.get("screenshot") or {})
         import time as _t
         _started = _t.time()
         pixmap = shots.capture_window()
@@ -2917,47 +2775,28 @@ class ScreenshotMixin:
                 pass
         if pixmap is None:
             return
-        self._deliver_capture(pixmap, opts)
-
-    def _deliver_capture(self, pixmap, opts):
-        try:
-            debug_log("capture %dx%d mode=%s -> folder %r"
-                      % (pixmap.width(), pixmap.height(),
-                         opts.get("mode") or "window",
-                         self.current_game_title() or shots.FOLDER_FALLBACK))
-        except Exception:
-            pass
-        if opts.get("trim_bars", True):
-            trimmed = shots.trim_bars(pixmap)
-            if trimmed is not pixmap:
-                pixmap = trimmed
-        shots.beep(opts.get("sound") or "")
+        shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
         title = self.current_game_title() or shots.FOLDER_FALLBACK
+        debug_log("capture -> folder %r (engine game %r)"
+                  % (title, (self.engine.game or {}).get("title")))
         store_ = self.shot_store
-        copy_after = bool(opts.get("copy_clipboard"))
 
         def save_in_background():
+            import time as _t2
+            _t0 = _t2.time()
             try:
-                store_.save(pixmap, title)
+                saved = store_.save(pixmap, title)
+                try:
+                    debug_log("saved %s in %.0f ms"
+                              % (saved.name, (_t2.time() - _t0) * 1000.0))
+                except Exception:
+                    pass
             except Exception:
                 return
             self._capturing = False
-            self.shot_signals.finished.emit(pixmap if copy_after else None)
+            QTimer.singleShot(0, self._after_screenshot)
 
         threading.Thread(target=save_in_background, daemon=True).start()
-
-    def _on_shot_saved(self, pixmap):
-        """GUI thread: clipboard copy plus the deferred gallery refresh."""
-        if pixmap is not None:
-            self._copy_to_clipboard(pixmap)
-        self._after_screenshot()
-
-    def _copy_to_clipboard(self, pixmap):
-        from PySide6.QtWidgets import QApplication
-        try:
-            QApplication.clipboard().setPixmap(pixmap)
-        except Exception:
-            pass
 
     def _after_screenshot(self):
         """Rebuild once, 1.5 s after the last shot, instead of after every one."""
@@ -3341,7 +3180,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
     def _retranslate_tabs(self):
         for tabs, captions in ((getattr(self, "tabs", None),
                                 ("General", "Presence", "Launchers", "Updates",
-                                 "Screenshots", "Tools")),
+                                 "Screenshots")),
                                (getattr(self, "presence_tabs", None),
                                 ("Reading", "Paused", "Idle", "Advanced"))):
             if tabs is None:
@@ -3647,7 +3486,6 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addStretch(1)
         self.tabs.addTab(page, tr("Updates"))
         self.tabs.addTab(self._build_screenshot(), tr("Screenshots"))
-        self.tabs.addTab(self._build_tools(), tr("Tools"))
         self._refresh_skip_label()
 
     # ------------------------------------------------------------ data actions
@@ -4865,8 +4703,6 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.shot_store = shots.ScreenshotStore(shot_opts.get("path") or None)
         self.hotkeys = HotkeyManager(self)
         self.hotkeys.triggered.connect(self._on_hotkey)
-        self.shot_signals = ShotSignals(self)
-        self.shot_signals.finished.connect(self._on_shot_saved)
         self._hotkey_state = False
         self._hotkey_timer = QTimer(self)
         self._hotkey_timer.setInterval(50)

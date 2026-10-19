@@ -9,7 +9,7 @@ that the application never imports are excluded to keep the file small.
 """
 from pathlib import Path
 
-APP_DIR = Path(SPECPATH) / "HyggerPresence_2.1.0"
+APP_DIR = Path(SPECPATH) / "HyggerPresence_2.1.1"
 ICON = str(APP_DIR / "icon.ico")
 
 datas = [

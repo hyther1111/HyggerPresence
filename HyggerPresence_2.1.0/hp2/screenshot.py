@@ -78,77 +78,6 @@ def _write_png(pixmap, path):
         return False
 
 
-def trim_bars(pixmap, threshold=12, inset=4):
-    """Remove uniform black borders (pillarbox or letterbox).
-
-    A window border can leave one or two non-black pixels at the edge, so up to
-    `inset` pixels are skipped before giving up on a side, and a column counts as
-    a bar when 95% of the sampled pixels are black. Returns the original pixmap
-    when no side looks like a bar, so a dark scene is never cropped by accident.
-    """
-    if pixmap is None or pixmap.isNull():
-        return pixmap
-    image = pixmap.toImage()
-    width, height = image.width(), image.height()
-    if width < 48 or height < 48:
-        return pixmap
-
-    def is_dark(value):
-        return ((value >> 16 & 0xFF) <= threshold
-                and (value >> 8 & 0xFF) <= threshold
-                and (value & 0xFF) <= threshold)
-
-    rows = [y for y in range(0, height, max(1, height // 80))]
-    cols = [x for x in range(0, width, max(1, width // 80))]
-
-    def column_dark(x):
-        hits = sum(1 for y in rows if is_dark(image.pixel(x, y)))
-        return hits >= max(1, int(len(rows) * 0.95))
-
-    def row_dark(y):
-        hits = sum(1 for x in cols if is_dark(image.pixel(x, y)))
-        return hits >= max(1, int(len(cols) * 0.95))
-
-    def run(start_, stop, step, dark):
-        """Length of the leading run of dark lines, skipping a small inset."""
-        skipped = 0
-        index = start_
-        while index != stop:
-            if dark(index):
-                break
-            skipped += 1
-            if skipped > inset:
-                return 0
-            index += step
-        length = 0
-        while index != stop and dark(index):
-            length += 1
-            index += step
-        return length
-
-    half_w, half_h = width // 2, height // 2
-    left = run(0, half_w, 1, column_dark)
-    right = run(width - 1, half_w - 1, -1, column_dark)
-    top = run(0, half_h, 1, row_dark)
-    bottom = run(height - 1, half_h - 1, -1, row_dark)
-
-    if left + right + top + bottom == 0:
-        return pixmap
-    rect = QRect(left, top, max(8, width - left - right),
-                 max(8, height - top - bottom))
-    cropped = pixmap.copy(rect)
-    if cropped.isNull():
-        return pixmap
-    try:
-        from .core import debug_log
-        debug_log("trim %dx%d -> %dx%d (l=%d r=%d t=%d b=%d)"
-                  % (width, height, cropped.width(), cropped.height(),
-                     left, right, top, bottom))
-    except Exception:
-        pass
-    return cropped
-
-
 class ScreenshotStore:
     """Folder layout and file naming."""
 
@@ -266,42 +195,6 @@ def pixmap_crop_hints(pixmap, screen):
     logical = max(1, screen.geometry().width())
     factor = pixmap.width() / logical
     return (1.0,) if abs(factor - 1.0) < 0.01 else (1.0, factor)
-
-
-UPSCALERS = ("magpie", "lossless scaling", "lsfg")
-
-
-def foreground_process_name():
-    """Executable name of the foreground window's process, lower case."""
-    hwnd = foreground_hwnd()
-    if not hwnd:
-        return ""
-    try:
-        user32 = ctypes.windll.user32
-        pid = ctypes.c_ulong(0)
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        import psutil
-        return psutil.Process(pid.value).name().lower()
-    except Exception:
-        return ""
-
-
-def _window_rect(hwnd):
-    rect = _RECT()
-    try:
-        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            return None
-    except Exception:
-        return None
-    return rect
-
-
-def _process_name(pid):
-    try:
-        import psutil
-        return psutil.Process(pid).name().lower()
-    except Exception:
-        return ""
 
 
 def foreground_hwnd():
