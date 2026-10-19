@@ -2884,6 +2884,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
     def _build_variables(self):
         page, layout = self._page()
         self._variable_pills = {}
+        self._variable_texts = {}
         for token, description in self.VARIABLES:
             translated = tr(description)
             parts = translated.split("\u2013", 1)
@@ -2913,6 +2914,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             line.addWidget(text, 1)
             layout.addWidget(row)
             self._variable_pills[token] = pill
+            self._variable_texts.setdefault("_", [])
+            self._variable_texts["_"].append((text, description))
         layout.addStretch(1)
         return page
 
@@ -2927,6 +2930,10 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
                 QTimer.singleShot(700, badge.hide)
 
     def refresh_variables(self):
+        for label, description in getattr(self, "_variable_texts", {}).get("_", []):
+            translated = tr(description)
+            parts = translated.split("\u2013", 1)
+            label.setText(parts[1].strip() if len(parts) > 1 else translated)
         if not hasattr(self, "_variables_label"):
             return
         from PySide6.QtWidgets import QApplication
