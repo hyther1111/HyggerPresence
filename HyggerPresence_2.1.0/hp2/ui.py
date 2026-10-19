@@ -214,7 +214,10 @@ def qss(p):
     QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right;
                width: 18px; border: none; background: transparent; }}
     QComboBox::down-arrow {{ image: url({p['arrow']}); width: 9px; height: 9px; }}
-    QComboBox QAbstractItemView::item {{ padding: 4px 6px; border: none; }}
+    QComboBox QAbstractItemView::item {{ padding: 4px 6px; border: none;
+    color: {p['text']}; }}
+QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
+    color: #ffffff; }}
     QToolButton#cover {{ background: {p['surface2']}; border: 1px solid {p['border']};
                border-radius: 8px; padding: 0px; }}
     QToolButton#cover:hover {{ border-color: {p['accent']}; }}
@@ -2903,7 +2906,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             badge = QLabel("\u2713", pill)
             badge.setStyleSheet("QLabel{color:#22c55e;background:transparent;"
                                 "font-weight:700;font-size:10px;}")
-            badge.move(pill.width() - 12, -4)
+            badge.move(max(2, pill.width() - 16), 1)
             badge.hide()
             badge.setAttribute(Qt.WA_TransparentForMouseEvents)
             pill._badge = badge
@@ -3436,10 +3439,10 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         summary = store.data_summary()
         answer = QMessageBox.question(
             self, tr("Import 1.x data"),
-            "Nothing was copied from the folder above.\n\n"
-            "This folder already has %d game(s) and %d session(s), so it is probably "
-            "already imported - press \u201cReload data\u201d if you just replaced the files.\n\n"
-            "Pick the files manually instead?" % (summary["games"], summary["sessions"]))
+            tr("Nothing was copied from the folder above.\n\n"
+               "This folder already has %d game(s) and %d session(s), so it is probably "
+               "already imported - press \u201cReload data\u201d if you just replaced the files.\n\n"
+               "Pick the files manually instead?") % (summary["games"], summary["sessions"]))
         if answer == QMessageBox.Yes:
             self._choose_import_files()
 
