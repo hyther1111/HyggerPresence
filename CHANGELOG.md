@@ -3,10 +3,15 @@
 ## 2.1.1 - 2026-10-19
 
 ### Added
+- **Capture area: game window or whole screen.** Utilities such as Magpie draw
+  the upscaled game full screen in their own window, so the game window is no
+  longer what you want to photograph. Choosing "whole screen" grabs the
+  composited desktop at its native resolution (2560x1440 on a 1440p display) and
+  hides this window for the moment of the grab.
 - **Trim black bars.** Captures drop uniform black borders (left/right or
-  top/bottom), which is what upscalers such as Magpie add when the game keeps
-  its original aspect ratio. On by default; a dark scene is left untouched
-  because both sides have to be solid black before anything is cropped.
+  top/bottom), which is what upscalers add when the game keeps its original
+  aspect ratio. On by default; a dark scene is left untouched because both sides
+  have to be solid black before anything is cropped.
 - **Copy to clipboard.** A switch in Settings -> Screenshots puts every capture
   on the clipboard, ready to paste into Discord or an image editor. Off by
   default.

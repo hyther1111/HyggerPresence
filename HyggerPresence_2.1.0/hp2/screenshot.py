@@ -249,6 +249,15 @@ def foreground_hwnd():
         return 0
 
 
+def capture_screen():
+    """The whole composited desktop (what an upscaler draws on screen)."""
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return None
+    pixmap = screen.grabWindow(0)
+    return None if pixmap.isNull() else pixmap
+
+
 def capture_window():
     """Contents of the foreground window, title bar excluded.
 

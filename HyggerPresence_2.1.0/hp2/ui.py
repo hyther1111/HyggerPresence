@@ -1940,6 +1940,17 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("WAV file played after each screenshot."))
 
         layout.addSpacing(12)
+        layout.addWidget(QLabel(tr("Capture area")))
+        self.shot_mode = QComboBox()
+        self.shot_mode.addItems([tr("Game window"), tr("Whole screen")])
+        self.shot_mode.setCurrentIndex(1 if (opts.get("mode") or "window") == "screen" else 0)
+        self.shot_mode.currentIndexChanged.connect(self._mode_changed)
+        layout.addWidget(self.shot_mode)
+        self._help(layout, tr("Whole screen grabs everything, which is what you "
+                              "want when an upscaler such as Magpie is showing "
+                              "the game full screen."))
+
+        layout.addSpacing(12)
         self.shot_trim = QCheckBox(tr("Trim black bars left and right"))
         self.shot_trim.setChecked(bool(opts.get("trim_bars", True)))
         self.shot_trim.toggled.connect(self._trim_changed)
@@ -1954,6 +1965,12 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("Paste straight into Discord or an image editor."))
         layout.addStretch(1)
         return page
+
+    def _mode_changed(self, index):
+        mode = "screen" if index == 1 else "window"
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["mode"] = mode
+        store.update_config_section("screenshot", {"mode": mode})
 
     def _trim_changed(self, enabled):
         opts = self.window.config.setdefault("screenshot", {})
@@ -2785,7 +2802,18 @@ class ScreenshotMixin:
                       % (now - getattr(self, "_last_capture_at", 0.0)))
             return
         self._last_capture_at = now
-        if not self.game_in_foreground():
+        capture_opts = (self.config.get("screenshot") or {})
+        whole_screen = (capture_opts.get("mode") or "window") == "screen"
+        if whole_screen:
+            # an upscaler owns the foreground window, so only require a game
+            if not self.engine.game:
+                return
+        elif not self.game_in_foreground():
+            return
+        if whole_screen:
+            # our own window must not end up in the picture
+            self.hide()
+            QTimer.singleShot(140, lambda o=capture_opts: self._finish_screen_capture(o))
             return
 
         # No delay: the window does not move away, and a delayed grab used to
@@ -2806,33 +2834,35 @@ class ScreenshotMixin:
                 pass
         if pixmap is None:
             return
+        self._deliver_capture(pixmap, opts)
+
+    def _finish_screen_capture(self, opts):
+        pixmap = shots.capture_screen()
+        self.show()
+        if pixmap is None:
+            return
+        self._deliver_capture(pixmap, opts)
+
+    def _deliver_capture(self, pixmap, opts):
+        try:
+            debug_log("capture %dx%d mode=%s -> folder %r"
+                      % (pixmap.width(), pixmap.height(),
+                         opts.get("mode") or "window",
+                         self.current_game_title() or shots.FOLDER_FALLBACK))
+        except Exception:
+            pass
         if opts.get("trim_bars", True):
             trimmed = shots.trim_bars(pixmap)
             if trimmed is not pixmap:
-                try:
-                    debug_log("trimmed %dx%d -> %dx%d"
-                              % (pixmap.width(), pixmap.height(),
-                                 trimmed.width(), trimmed.height()))
-                except Exception:
-                    pass
                 pixmap = trimmed
         shots.beep(opts.get("sound") or "")
-        copy_after = bool(opts.get("copy_clipboard"))
         title = self.current_game_title() or shots.FOLDER_FALLBACK
-        debug_log("capture -> folder %r (engine game %r)"
-                  % (title, (self.engine.game or {}).get("title")))
         store_ = self.shot_store
+        copy_after = bool(opts.get("copy_clipboard"))
 
         def save_in_background():
-            import time as _t2
-            _t0 = _t2.time()
             try:
-                saved = store_.save(pixmap, title)
-                try:
-                    debug_log("saved %s in %.0f ms"
-                              % (saved.name, (_t2.time() - _t0) * 1000.0))
-                except Exception:
-                    pass
+                store_.save(pixmap, title)
             except Exception:
                 return
             self._capturing = False

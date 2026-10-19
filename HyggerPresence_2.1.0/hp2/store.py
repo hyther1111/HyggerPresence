@@ -49,7 +49,8 @@ DEFAULT_CONFIG = {
     "launchers": [],
     "close_to_tray": True,
     "screenshot": {"path": "", "hotkey": "", "sound": "",
-                   "trim_bars": True, "copy_clipboard": False},
+                   "trim_bars": True, "copy_clipboard": False,
+                   "mode": "window"},
 }
 
 
