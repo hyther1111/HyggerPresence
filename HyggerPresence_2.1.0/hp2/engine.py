@@ -780,6 +780,18 @@ class Engine(DetectorMixin):
                 debug_log("status %s -> %s (candidate)" % (self.status, status))
             self.status = status
             self.preview = self._build_preview(game, status)
+            now_i = int(now)
+            if now_i - getattr(self, "_clock_log_at", 0) >= 5:
+                self._clock_log_at = now_i
+                try:
+                    debug_log("clock st=%s sess=%.0f acc=%.0f reading_start=%s "
+                              "key=%s pushed_st=%s"
+                              % (status, float(self.session_seconds or 0),
+                                 float(self._session_accumulated or 0),
+                                 "yes" if self._reading_start else "no",
+                                 self._session_exe, self._pushed_status))
+                except Exception:
+                    pass
             should_push = (identity_changed
                            or (status_changed and (stable or first_push))
                            or now - self._last_sent >= KEEPALIVE)
