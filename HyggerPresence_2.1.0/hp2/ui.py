@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QSizeGrip, QStackedWidget,
-                               QListWidget, QListWidgetItem, QTabWidget,
+                               QListWidget, QListWidgetItem, QSpinBox, QTabWidget,
                                QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -35,6 +35,7 @@ from . import i18n
 from .i18n import LANGUAGES, set_language, tr
 from .core import debug_log
 from . import screenshot as shots
+from . import windowtool
 from .hotkey import HotkeyManager, describe, from_qt
 from . import hotkey as hotkey_mod
 from .stats import StatsStore
@@ -1221,7 +1222,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.1.1"          # one inset for the title bar, the sidebar and the status bar
+APP_VERSION = "2.2.0"          # one inset for the title bar, the sidebar and the status bar
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -1887,6 +1888,92 @@ class StatsPage(Page):
 
 # ===================================================================== screenshots
 class ScreenshotSettingsMixin:
+    # ------------------------------------------------------------- tools tab
+    def _build_tools(self):
+        page, layout = self._page()
+        layout.addWidget(QLabel(tr("Window size")))
+        self.tool_target = QLabel(tr("Bring the game to the front, then press "
+                                     "Refresh."))
+        self.tool_target.setObjectName("sub")
+        self.tool_target.setWordWrap(True)
+        layout.addWidget(self.tool_target)
+        refresh = QPushButton(tr("Refresh"))
+        refresh.clicked.connect(self._tool_refresh)
+        row = QHBoxLayout()
+        row.addWidget(refresh)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        layout.addSpacing(10)
+        layout.addWidget(QLabel(tr("Resolution")))
+        self.tool_preset = QComboBox()
+        self.tool_preset.addItem(tr("Custom"), (0, 0))
+        for width, height in windowtool.PRESETS:
+            self.tool_preset.addItem("%d x %d" % (width, height), (width, height))
+        self.tool_preset.currentIndexChanged.connect(self._tool_preset_changed)
+        layout.addWidget(self.tool_preset)
+
+        size_row = QHBoxLayout()
+        self.tool_width = QSpinBox()
+        self.tool_width.setRange(320, 7680)
+        self.tool_width.setValue(1920)
+        self.tool_height = QSpinBox()
+        self.tool_height.setRange(240, 4320)
+        self.tool_height.setValue(1080)
+        size_row.addWidget(self.tool_width)
+        size_row.addWidget(QLabel("x"))
+        size_row.addWidget(self.tool_height)
+        size_row.addStretch(1)
+        apply_button = QPushButton(tr("Apply"))
+        apply_button.clicked.connect(self._tool_apply)
+        size_row.addWidget(apply_button)
+        layout.addLayout(size_row)
+
+        self.tool_status = QLabel("")
+        self.tool_status.setObjectName("sub")
+        self.tool_status.setWordWrap(True)
+        layout.addWidget(self.tool_status)
+        self._help(layout, tr("Exclusive full screen games have to be switched "
+                             "to a window first. A game that enforces its own "
+                             "size may snap back immediately."))
+        layout.addStretch(1)
+        self._tool_refresh()
+        return page
+
+    def _tool_refresh(self):
+        found = windowtool.foreground_window()
+        if found is None:
+            self.tool_target.setText(tr("No window in the foreground."))
+            self._tool_hwnd = 0
+            return
+        hwnd, title, width, height = found
+        self._tool_hwnd = hwnd
+        self.tool_target.setText("%s  -  %dx%d" % (title or "?", width, height))
+        if width and height:
+            self.tool_width.setValue(max(320, min(7680, width)))
+            self.tool_height.setValue(max(240, min(4320, height)))
+
+    def _tool_preset_changed(self, _index):
+        payload = self.tool_preset.currentData()
+        if not payload or not payload[0]:
+            return
+        self.tool_width.setValue(payload[0])
+        self.tool_height.setValue(payload[1])
+
+    def _tool_apply(self):
+        hwnd = getattr(self, "_tool_hwnd", 0)
+        if not hwnd:
+            self._tool_refresh()
+            hwnd = getattr(self, "_tool_hwnd", 0)
+        if not hwnd:
+            self.tool_status.setText(tr("No window in the foreground."))
+            return
+        ok, message = windowtool.resize_client(hwnd, self.tool_width.value(),
+                                               self.tool_height.value())
+        self.tool_status.setText(message if ok else tr("Failed: %s") % message)
+        if ok:
+            self._tool_refresh()
+
     def _build_screenshot(self):
         page, layout = self._page()
         opts = self.window.config.setdefault("screenshot", {})
@@ -3231,7 +3318,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
     def _retranslate_tabs(self):
         for tabs, captions in ((getattr(self, "tabs", None),
                                 ("General", "Presence", "Launchers", "Updates",
-                                 "Screenshots")),
+                                 "Screenshots", "Tools")),
                                (getattr(self, "presence_tabs", None),
                                 ("Reading", "Paused", "Idle", "Advanced"))):
             if tabs is None:
@@ -3537,6 +3624,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addStretch(1)
         self.tabs.addTab(page, tr("Updates"))
         self.tabs.addTab(self._build_screenshot(), tr("Screenshots"))
+        self.tabs.addTab(self._build_tools(), tr("Tools"))
         self._refresh_skip_label()
 
     # ------------------------------------------------------------ data actions

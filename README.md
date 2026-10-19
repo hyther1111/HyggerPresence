@@ -4,8 +4,8 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.1.1** — screenshot gallery with global hotkey, black bar
-trimming and clipboard copy.
+Current release: **2.2.0** — adds a window size tool next to the screenshot
+gallery.
 
 ## Requirements
 
@@ -178,6 +178,18 @@ Examples:
 | `{h:}{mm}:{ss}` | `1:23:04` | `00:23:04` |
 | `{h?}{h:}{/h}{mm}:{ss}` | `1:23:04` | `00:23:04` |
 | `{h?}{h}h {m}m{/h}{!h}{m}m {ss}s{/!h}` | `1h 23m` | `23m 04s` |
+
+## Tools
+
+Settings -> Tools:
+
+| Field | Meaning |
+|---|---|
+| Window size | Shows the title and client size of the window in the foreground. Press **Refresh** while the game is in front. |
+| Resolution | Pick a preset or type a width and height, then press **Apply**. The frame is accounted for, so 1920x1080 gives a 1920x1080 drawing area. |
+
+Exclusive full screen games must be switched to a window first, and a game that
+enforces its own size may snap back to it immediately.
 
 ## Project layout
 

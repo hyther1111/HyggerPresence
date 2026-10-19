@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.0 - 2026-10-19
+
+### Added
+- **Tools tab with a window size tool.** Games that only scale by dragging the
+  corner can be put back to a real resolution: bring the game to the front, pick
+  a preset (1280x720, 1366x768, 1600x900, 1920x1080, 2560x1440) or type a size,
+  press Apply. The window frame is taken into account with
+  `AdjustWindowRectExForDpi`, so 1920x1080 means a 1920x1080 drawing area.
+  Exclusive full screen windows have to be switched to a window first, and a game
+  that enforces its own size may snap back.
+
 ## 2.1.1 - 2026-10-19
 
 ### Added
