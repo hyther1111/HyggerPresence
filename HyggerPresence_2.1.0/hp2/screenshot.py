@@ -86,8 +86,11 @@ class ScreenshotStore:
 
     def save(self, pixmap, title, when=None):
         path = self.next_path(title, when)
-        if not pixmap.save(str(path), "PNG"):
-            raise OSError("could not write %s" % path)
+        # quality 40 keeps PNG fast: default compression costs ~150 ms per
+        # 2560x1440 frame and that was showing up as a CPU spike
+        if not pixmap.save(str(path), "PNG", 40):
+            if not pixmap.save(str(path), "PNG"):
+                raise OSError("could not write %s" % path)
         return path
 
     # ------------------------------------------------------------------- read

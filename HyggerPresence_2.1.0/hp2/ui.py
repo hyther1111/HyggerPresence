@@ -2096,7 +2096,7 @@ class ScreenshotPage(Page):
         self._watcher.directoryChanged.connect(self._on_files_changed)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.setInterval(350)
+        self._refresh_timer.setInterval(800)
         self._refresh_timer.timeout.connect(self._fill)
 
         self._thumb_jobs = []
@@ -2154,7 +2154,7 @@ class ScreenshotPage(Page):
 
     def _on_files_changed(self, *_args):
         self._watch_paths()
-        if not self.isVisible():
+        if not self.isVisible() or getattr(self, "_capturing", False):
             self._dirty = True          # refresh when the page is shown again
             return
         if not self._refresh_timer.isActive():
@@ -2736,6 +2736,7 @@ class ScreenshotMixin:
 
         # No delay: the window does not move away, and a delayed grab used to
         # capture whatever had the focus by then.
+        self._capturing = True
         pixmap = shots.capture_window()
         if pixmap is None:
             return
@@ -2748,6 +2749,7 @@ class ScreenshotMixin:
                 store_.save(pixmap, title)
             except Exception:
                 return
+            self._capturing = False
             QTimer.singleShot(0, self._after_screenshot)
 
         threading.Thread(target=save_in_background, daemon=True).start()

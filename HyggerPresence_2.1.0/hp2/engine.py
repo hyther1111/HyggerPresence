@@ -22,7 +22,8 @@ from .winapi import wait_for_process_exit
 MAX_LINE = 128
 RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
-KEEPALIVE = 55.0             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
+KEEPALIVE = 55.0
+MIN_PUSH_INTERVAL = 4.2        # 5 updates per 20 s is Discord's limit             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
 STATUS_DEBOUNCE = 0.5        # a new status must hold this long before it is pushed
 
 
@@ -779,9 +780,13 @@ class Engine(DetectorMixin):
             if should_push and not (status_changed and not (stable or first_push)):
                 if self.presence_enabled:
                     debug_log("status %s accepted after %.1fs" % (status, now - candidate[1]))
-                    self._push(game, status)
-                    self._pushed_identity = identity
-                    self._pushed_status = status
+                    sent = self._push(game, status)
+                    if sent:
+                        self._pushed_identity = identity
+                        self._pushed_status = status
+                    else:
+                        # nothing reached Discord: try again on the next tick
+                        self._pushed_status = None
             self._notify()
         except Exception as error:
             self.last_error = "tick: %s" % error
@@ -839,8 +844,11 @@ class Engine(DetectorMixin):
     def _push(self, game, status):
         """Compose the payload here (cheap) and send it on the worker thread."""
         preview = self.preview
-        if not preview or time.time() < self._next_push_at:
-            return
+        now = time.time()
+        if not preview or now < self._next_push_at:
+            return False
+        if self._last_sent and now - self._last_sent < MIN_PUSH_INTERVAL:
+            return False           # throttled, the caller retries later
         try:
             kwargs = {
                 "name": _clip(preview["title"], 128),
@@ -873,8 +881,10 @@ class Engine(DetectorMixin):
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
             self._push_token += 1
             self._submit(self._do_push, kwargs, game.get("image"), self._push_token)
+            return True
         except Exception as error:
             self.last_error = "compose: %s" % error
+            return False
 
     def _do_push(self, kwargs, cover, token=None):
         started_at = time.time()
@@ -912,8 +922,10 @@ class Engine(DetectorMixin):
         except Exception as error:
             self.last_error = "rpc: %s" % error
             # Discord rate limits activity updates: wait before trying again
-            lowered = str(error).lower()
-            self._next_push_at = time.time() + (60.0 if "rate" in lowered else 3.0)
+            # 1.0.3 closed the socket and reconnected on the next tick; waiting a
+            # full minute left the card missing for a minute.
+            self._next_push_at = time.time() + MIN_PUSH_INTERVAL
+            self._pushed_status = None
             self._close_async(presence)
             if self.rpc is presence:
                 self.rpc = None
