@@ -412,6 +412,7 @@ class Engine(DetectorMixin):
                           % (getattr(func, "__name__", "call"), elapsed))
 
     def _mark_dead(self, error):
+        debug_log("rpc marked dead: %s" % error)
         """Drop the connection so the next action reconnects from scratch."""
         self.last_error = "rpc: %s" % error
         lowered = str(error).lower()
@@ -867,6 +868,11 @@ class Engine(DetectorMixin):
             return False
         if self._last_sent and now - self._last_sent < MIN_PUSH_INTERVAL:
             return False           # throttled, the caller retries later
+        if now - getattr(self, "_last_push_begin", 0.0) < 1.2:
+            debug_log("push skipped: another one started %.2fs ago"
+                      % (now - getattr(self, "_last_push_begin", 0.0)))
+            return False
+        self._last_push_begin = now
         try:
             kwargs = {
                 "name": _clip(preview["title"], 128),
@@ -913,6 +919,7 @@ class Engine(DetectorMixin):
             debug_log("push done in %.0f ms" % ((time.time() - started_at) * 1000.0))
 
     def _do_push_inner(self, kwargs, cover, token, started_at):
+        debug_log("connecting: rpc=%s" % ("open" if self.rpc else "closed"))
         """Worker thread: connect if needed, send, fall back, close on failure."""
         if not self.rpc and not self.connect():
             return
@@ -1019,7 +1026,7 @@ class Engine(DetectorMixin):
             if self._session_accumulated > 0:
                 self._grace = (time.time(), folder, title,
                                self._session_accumulated, key)
-                debug_log("session held (exit watch): exe=%s folder=%s title=%s "
+                debug_log("session held (exit watch fired): exe=%s folder=%s title=%s "
                           "secs=%.1f" % (key, folder, title,
                                          self._session_accumulated))
             # the process watcher noticed the exit first: clear the session here too,
