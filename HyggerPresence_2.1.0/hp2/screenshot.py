@@ -260,6 +260,79 @@ def foreground_process_name():
         return ""
 
 
+def _window_rect(hwnd):
+    rect = _RECT()
+    try:
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+    except Exception:
+        return None
+    return rect
+
+
+def _process_name(pid):
+    try:
+        import psutil
+        return psutil.Process(pid).name().lower()
+    except Exception:
+        return ""
+
+
+def upscaler_window():
+    """Find a window that an upscaler uses to show the game full screen.
+
+    Magpie does not have to own the foreground window: it renders the upscaled
+    frame while the game keeps the focus. So look for any visible window that
+    covers (almost) the whole screen and belongs to a different process than the
+    game - the process name is used as a hint, the size is the real test.
+    Returns (name, width, height) or None.
+    """
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:
+        return None
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return None
+    geometry = screen.geometry()
+    min_width = geometry.width() * 0.9
+    min_height = geometry.height() * 0.9
+    found = []
+
+    prototype = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def callback(hwnd, _param):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            rect = _window_rect(hwnd)
+            if rect is None:
+                return True
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            if width < min_width or height < min_height:
+                return True
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            name = _process_name(pid.value)
+            if not name or name.startswith(("explorer", "dwm", "widgets", "search")):
+                return True
+            if pid.value == os.getpid():
+                return True
+            if "magpie" in name or "lossless" in name:
+                found.append((name, width, height))
+                return False
+        except Exception:
+            return True
+        return True
+
+    try:
+        user32.EnumWindows(prototype(callback), 0)
+    except Exception:
+        return None
+    return found[0] if found else None
+
+
 def foreground_fills_screen(tolerance=0.9):
     """True when the foreground window covers (almost) the whole screen."""
     hwnd = foreground_hwnd()

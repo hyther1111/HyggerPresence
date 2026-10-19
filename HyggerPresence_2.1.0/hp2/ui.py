@@ -2813,17 +2813,17 @@ class ScreenshotMixin:
         else:
             # Auto: an upscaler is in front when its process matches, or when
             # whatever is in front covers the screen while our game is smaller.
+            probe = shots.upscaler_window()
+            game_exe = (self.engine.game or {}).get("exe") or ""
+            game_name = Path(game_exe).name.lower() if game_exe else ""
             whole_screen = shots.foreground_is_upscaler()
-            if not whole_screen:
-                foreground = shots.foreground_process_name()
-                game_exe = (self.engine.game or {}).get("exe") or ""
-                game_name = Path(game_exe).name.lower() if game_exe else ""
-                if foreground and foreground != game_name and shots.foreground_fills_screen():
+            if not whole_screen and probe is not None:
+                name = probe[0]
+                if "magpie" in name or "lossless" in name:
                     whole_screen = True
             try:
-                debug_log("auto capture: foreground=%r fills=%s -> %s"
-                          % (shots.foreground_process_name(),
-                             shots.foreground_fills_screen(),
+                debug_log("auto capture: foreground=%r probe=%r game=%r -> %s"
+                          % (shots.foreground_process_name(), probe, game_name,
                              "screen" if whole_screen else "window"))
             except Exception:
                 pass
