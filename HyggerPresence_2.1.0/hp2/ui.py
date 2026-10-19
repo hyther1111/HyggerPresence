@@ -2476,6 +2476,8 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
 
     # --------------------------------------------------------------------- fill
     def _fill(self):
+        import time as _t3
+        _fill_started = _t3.time()
         store_ = self._shot_store()
         is_shot = self._view == "shot"
         self.back_button.setVisible(self._view != "games")
@@ -2536,6 +2538,13 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
 
         self.scroll.setWidget(host)
         self._watch_paths()
+        try:
+            from .core import debug_log
+            debug_log("gallery %s rebuilt in %.0f ms (%d cards)"
+                      % (self._view, (_t3.time() - _fill_started) * 1000.0,
+                         len(self._cards)))
+        except Exception:
+            pass
 
     def _fill_single(self):
         path = self._shot
@@ -2737,7 +2746,19 @@ class ScreenshotMixin:
         # No delay: the window does not move away, and a delayed grab used to
         # capture whatever had the focus by then.
         self._capturing = True
+        import time as _t
+        _started = _t.time()
         pixmap = shots.capture_window()
+        if pixmap is None:
+            self._capturing = False
+        else:
+            try:
+                from .core import debug_log
+                debug_log("capture %dx%d in %.0f ms"
+                          % (pixmap.width(), pixmap.height(),
+                             (_t.time() - _started) * 1000.0))
+            except Exception:
+                pass
         if pixmap is None:
             return
         shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
@@ -2745,8 +2766,16 @@ class ScreenshotMixin:
         store_ = self.shot_store
 
         def save_in_background():
+            import time as _t2
+            _t0 = _t2.time()
             try:
-                store_.save(pixmap, title)
+                saved = store_.save(pixmap, title)
+                try:
+                    from .core import debug_log
+                    debug_log("saved %s in %.0f ms"
+                              % (saved.name, (_t2.time() - _t0) * 1000.0))
+                except Exception:
+                    pass
             except Exception:
                 return
             self._capturing = False
