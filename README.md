@@ -4,8 +4,8 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.0.0** — Qt (PySide6) rewrite of the 1.x tkinter
-application.
+Current release: **2.1.0** — screenshot gallery, global capture hotkey and a
+rewritten Discord update pipeline.
 
 ## Requirements
 
@@ -15,14 +15,18 @@ application.
 
 ## Install and run
 
-Download `HyggerPresence.exe` from the releases page and run it. On first start
-it creates `games.json`, `config.json` and `stats.db` next to the executable.
+Download `HyggerPresence.exe` from the releases page and run it.
+
+Your data lives in `%APPDATA%\HyggerPresence` (`games.json`, `config.json`,
+`stats.db`, `presence_debug.log`). Nothing is written next to the executable, so
+replacing the exe keeps the library, the settings and the playtime. Data next to
+an older build is copied into that folder on first start.
 
 From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.0.0
+cd HyggerPresence/HyggerPresence_2.1.0
 pip install -r requirements.txt
 python main.py
 ```
@@ -88,6 +92,33 @@ itself, so replacing the executable keeps the library and playtime.
 - Languages: English, Traditional Chinese, Simplified Chinese (instant switch).
 - Debug mode writes `presence_debug.log` with the foreground window, the
   matched processes and the reason a status was chosen.
+
+## Screenshots
+
+Settings -> Screenshots:
+
+| Field | Meaning |
+|---|---|
+| Screenshot folder | Where the gallery lives. Defaults to `Pictures\HyggerPresence`; move it to another drive if you like. |
+| Hotkey | Global shortcut that captures the active window. Click the field, press the combination, press Escape to clear it. Unbound by default. |
+| Sound | Shutter sound played after each capture. Any WAV or MCI supported file (mp3, wma, m4a, flac, ogg); empty uses the Windows sound. |
+
+Each capture is stored as
+
+```
+<Pictures>\HyggerPresence\<game title>\2026-10-19-21-03-11.png
+<Pictures>\HyggerPresence\<game title>\2026-10-19-21-03-11_2.png   same second
+```
+
+The folder name is the title in its original script, so different games never mix.
+A capture only happens when the detected game owns the foreground window, and the
+title bar is never included.
+
+The **Screenshots** page lists one card per game with its cover, its title and how
+many screenshots it holds. Double click a card to open the game, double click a
+screenshot to view it full size; `Esc` goes one level up. `Ctrl+A` selects all,
+`Ctrl+C` copies, `Delete` removes (confirmation above one file), and the right
+click menu offers Copy / Open / Show in folder / Delete.
 
 ## Templates
 

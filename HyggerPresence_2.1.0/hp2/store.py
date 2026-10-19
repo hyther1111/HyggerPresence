@@ -149,6 +149,19 @@ def _strip_defaults(values, defaults):
     return result
 
 
+def update_config_section(section, values):
+    """Write only one section of config.json, leaving everything else alone."""
+    data = _read_json(CONFIG_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    current = data.get(section)
+    if not isinstance(current, dict):
+        current = {}
+    current.update(values or {})
+    data[section] = current
+    _write_json(CONFIG_FILE, data)
+
+
 def save_config(config):
     existing = _read_json(CONFIG_FILE)
     if isinstance(existing, dict) and isinstance(config, dict):

@@ -2699,7 +2699,7 @@ class ScreenshotMixin:
         opts = self.config.setdefault("screenshot", {})
         opts["path"] = folder or ""
         self.shot_store = shots.ScreenshotStore(folder or None)
-        store.save_config(self.config)
+        store.update_config_section("screenshot", {"path": folder or ""})
         if hasattr(self, "shots_page"):
             self.shots_page.refresh()
 
@@ -2822,7 +2822,7 @@ class ScreenshotMixin:
     def set_sound(self, path):
         opts = self.config.setdefault("screenshot", {})
         opts["sound"] = path or ""
-        store.save_config(self.config)
+        store.update_config_section("screenshot", {"sound": path or ""})
 
     def play_sound(self):
         shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
@@ -2830,7 +2830,7 @@ class ScreenshotMixin:
     def set_hotkey(self, spec):
         opts = self.config.setdefault("screenshot", {})
         opts["hotkey"] = spec
-        store.save_config(self.config)
+        store.update_config_section("screenshot", {"hotkey": spec})
         self._register_hotkey()
 
     def _register_hotkey(self):

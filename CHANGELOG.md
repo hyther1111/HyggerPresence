@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.1.0 - 2026-10-19
+
+### Screenshots (new)
+- New page between Statistics and Settings. Cards behave like folders: one card
+  per game with its cover, title and screenshot count, double click to open the
+  game, double click a screenshot to view it full size in the same page.
+- Search by title, romanised title, developer, year or executable, exactly like
+  the library. `Esc` goes one level up, `Ctrl+A` selects everything, `Ctrl+C`
+  copies the selection and `Delete` removes it.
+- Right click menu: Copy, Open, Show in folder (single selection) and Delete.
+  Deleting more than one file asks for confirmation.
+- Window capture only, title bar excluded. A capture is refused unless the game
+  owns the foreground window, so switching windows cannot produce stray images.
+- Global hotkey, unbound by default; click the field, press the combination, or
+  press Escape to clear it. A shutter sound plays after each capture and can be
+  replaced with any WAV or MCI supported file.
+- Files are stored in `Pictures\\HyggerPresence\\<game title>\\yyyy-mm-dd-hh-mm-ss.png`
+  (`_2`, `_3` when two shots land in the same second). The folder can be moved in
+  Settings -> Screenshots.
+- Thumbnails are decoded at display size and cached in
+  `%LOCALAPPDATA%\\HyggerPresence\\thumbs`, so large folders open instantly and
+  fill in as you watch.
+
+### Fixed
+- Saving the settings no longer drops keys the page does not own: `client_id`,
+  `launchers`, `presence_opts`, `last_le_path` and `ui` survive every save.
+- The Discord card no longer disappears every ~30 seconds. The presence watchdog
+  used to close a healthy connection and reconnect; it now only republishes.
+- Status changes reach Discord in about a second again (150 ms debounce, token
+  bucket instead of a flat 4.2 s gate, so 5 updates per 20 s is still respected).
+- Two pushes in the same second are skipped, which previously made Discord redraw
+  the card twice and look like a disconnect.
+- Captures are refused unless the game is in the foreground, and no window is
+  hidden while capturing, so stray screenshots are gone.
+- Session bookkeeping is keyed by the game instead of the raw executable string.
+- PNG encoding dropped from ~270 ms to ~30 ms per 1080p frame; the gallery is
+  rebuilt once after a burst of captures instead of after every shot.
+- A data file that cannot be read is quarantined instead of being replaced, and
+  a library is never overwritten by an empty list.
+
+### Changed
+- User data (games.json, config.json, stats.db, presence_debug.log) moved to
+  `%APPDATA%\\HyggerPresence`. Existing files next to the executable are copied
+  there on first start.
+- The screenshot hotkey replaces the old behaviour of capturing whatever window
+  had focus.
+
 ## 2.0.0 — 2026-10-19
 
 The interface was rewritten in Qt (PySide6). Detection, the Discord connection
