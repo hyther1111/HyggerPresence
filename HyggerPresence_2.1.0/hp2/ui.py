@@ -214,7 +214,11 @@ def qss(p):
     QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right;
                width: 18px; border: none; background: transparent; }}
     QComboBox::down-arrow {{ image: url({p['arrow']}); width: 9px; height: 9px; }}
-    QComboBox QAbstractItemView::item {{ padding: 4px 6px; border: none;
+    QLabel#pill {{ font-family: Consolas, "Courier New", monospace;
+    background: {p['surface2']}; color: {p['text']};
+    padding: 2px 8px; border-radius: 4px; }}
+QLabel#tick {{ background: transparent; color: {p['green']}; }}
+QComboBox QAbstractItemView::item {{ padding: 4px 6px; border: none;
     color: {p['text']}; }}
 QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     color: #ffffff; }}
@@ -2150,6 +2154,9 @@ class ScreenshotPage(Page):
 
     def _on_files_changed(self, *_args):
         self._watch_paths()
+        if not self.isVisible():
+            self._dirty = True          # refresh when the page is shown again
+            return
         if not self._refresh_timer.isActive():
             self._refresh_timer.start()
 
@@ -2458,6 +2465,12 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         self._limit += 120
         self._fill()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_dirty", False):
+            self._dirty = False
+            QTimer.singleShot(0, self._fill)
+
     def refresh(self):
         self._fill()
 
@@ -2740,8 +2753,8 @@ class ScreenshotMixin:
         threading.Thread(target=save_in_background, daemon=True).start()
 
     def _after_screenshot(self):
-        if hasattr(self, "shots_page"):
-            self.shots_page.refresh()
+        """The file watcher already refreshes the page; do not rebuild it twice."""
+        return
 
     def _on_hotkey(self, _name):
         self.take_screenshot()
@@ -2900,22 +2913,17 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             pill = QLabel(token)
             pill.setCursor(Qt.PointingHandCursor)
             pill.setToolTip(tr("Click to copy"))
-            pill.setStyleSheet(
-                "QLabel{font-family:Consolas,'Courier New',monospace;background:%s;"
-                "color:%s;padding:2px 15px 2px 6px;border-radius:4px;}"
-                % (self.window.palette["surface2"], self.window.palette["text"]))
-            badge = QLabel("\u2713", pill)
-            badge.setFixedSize(11, 13)
-            badge.setAlignment(Qt.AlignCenter)
-            badge.setStyleSheet("QLabel{color:#22c55e;background:transparent;"
-                                "font-weight:700;font-size:9px;}")
-            badge.move(max(2, pill.width() - 14), 2)
-            badge.raise_()
+            pill.setObjectName("pill")
+            badge = QLabel("\u2713")
+            badge.setObjectName("tick")
+            badge.setFixedWidth(14)
+            badge.setStyleSheet("QLabel{color:#22c55e;font-weight:700;}"
+                                "QLabel{background:transparent;}")
             badge.hide()
-            badge.setAttribute(Qt.WA_TransparentForMouseEvents)
             pill._badge = badge
             pill.mousePressEvent = lambda _e, tk=token, pl=pill: self._copy_token(tk, pl)
             line.addWidget(pill)
+            line.addWidget(badge)
             text = QLabel(explanation)
             text.setWordWrap(True)
             line.addWidget(text, 1)
@@ -2932,9 +2940,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         if pill is not None:
             badge = getattr(pill, "_badge", None)
             if badge is not None:
-                badge.move(max(0, pill.width() - 12), -3)
                 badge.show()
-                QTimer.singleShot(700, badge.hide)
+                QTimer.singleShot(900, badge.hide)
 
     def refresh_variables(self):
         for label, description in getattr(self, "_variable_texts", {}).get("_", []):
