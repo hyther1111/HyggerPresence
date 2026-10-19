@@ -2767,7 +2767,6 @@ class ScreenshotMixin:
             self._capturing = False
         else:
             try:
-                from .core import debug_log
                 debug_log("capture %dx%d in %.0f ms"
                           % (pixmap.width(), pixmap.height(),
                              (_t.time() - _started) * 1000.0))
@@ -2787,7 +2786,6 @@ class ScreenshotMixin:
             try:
                 saved = store_.save(pixmap, title)
                 try:
-                    from .core import debug_log
                     debug_log("saved %s in %.0f ms"
                               % (saved.name, (_t2.time() - _t0) * 1000.0))
                 except Exception:
@@ -2854,8 +2852,13 @@ class ScreenshotMixin:
             return
         if not manager.is_bound():
             manager.release()
-            manager.bind("window", parsed[0], parsed[1])
-        if not self._hotkey_timer.isActive():
+            registered = manager.bind("window", parsed[0], parsed[1])
+        else:
+            registered = True
+        if registered:
+            # Windows delivers WM_HOTKEY, the 50 ms poll would fire as well
+            self._hotkey_timer.stop()
+        elif not self._hotkey_timer.isActive():
             self._hotkey_timer.start()
 
     def _poll_hotkey(self):

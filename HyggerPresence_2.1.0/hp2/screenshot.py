@@ -213,26 +213,8 @@ def capture_window():
     screen = QGuiApplication.primaryScreen()
     if screen is None:
         return None
-    hwnd = foreground_hwnd()
-    if hwnd:
-        grabbed = screen.grabWindow(hwnd)
-        if not grabbed.isNull():
-            rect = foreground_client_rect()
-            if rect is not None:
-                try:
-                    user32 = ctypes.windll.user32
-                    frame = _RECT()
-                    user32.GetWindowRect(hwnd, ctypes.byref(frame))
-                    chrome = max(0, rect.top() - frame.top)
-                    ratio = (grabbed.devicePixelRatio()
-                             or grabbed.width() / max(1, screen.geometry().width()))
-                    top = int(chrome * ratio)
-                    if 0 < top < grabbed.height() // 3:
-                        return grabbed.copy(QRect(0, top, grabbed.width(),
-                                                  grabbed.height() - top))
-                except Exception:
-                    pass
-            return grabbed
+    # Grab the composited screen and crop the client area: a window grab
+    # (grabWindow(hwnd)) comes back black for anything a game draws on the GPU.
     full = screen.grabWindow(0)
     rect = foreground_client_rect()
     if full.isNull() or rect is None:
