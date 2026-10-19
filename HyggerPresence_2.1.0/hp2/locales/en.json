@@ -280,6 +280,7 @@
   "Which name the Library list shows for each game.": "Which name the Library list shows for each game.",
   "You are up to date (%s).": "You are up to date (%s).",
   "You chose “skip this version” for a release. This forgets that, so you get told about it again.": "You chose “skip this version” for a release. This forgets that, so you get told about it again.",
+  "games.json, config.json and stats.db live in %APPDATA%\\HyggerPresence. Put your old files there and press Reload.": "games.json, config.json and stats.db live in %APPDATA%\\HyggerPresence. Put your old files there and press Reload.",
   "games.json, config.json and stats.db live next to main.py. Put your old files there and press Reload.": "games.json, config.json and stats.db live next to main.py. Put your old files there and press Reload.",
   "show": "show",
   "{developer} – developer name": "{developer} – developer name",

@@ -2318,7 +2318,8 @@ class ScreenshotPage(Page):
         for key, card in self._cards.items():
             if not hasattr(card, "setStyleSheet"):
                 continue
-            border = ("2px solid %s" % accent) if key in self._selection else "none"
+            border = (("2px solid %s" % accent) if key in self._selection
+                      else "2px solid transparent")
             card.setStyleSheet(CARD_QSS % dict(self.window.palette, border=border))
 
     def _apply_selection_style(self):
@@ -2549,7 +2550,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         card.setObjectName("shotcard")
         card.setCursor(Qt.PointingHandCursor)
         card.setFixedWidth(self.COVER[0] + 30)
-        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="none"))
+        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="2px solid transparent"))
         lay = QVBoxLayout(card)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(6)
@@ -2581,7 +2582,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
         card.setObjectName("shotcard")
         card.setCursor(Qt.PointingHandCursor)
         card.setFixedWidth(self.THUMB[0] + 16)
-        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="none"))
+        card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="2px solid transparent"))
         lay = QVBoxLayout(card)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(4)
@@ -2901,12 +2902,15 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             pill.setToolTip(tr("Click to copy"))
             pill.setStyleSheet(
                 "QLabel{font-family:Consolas,'Courier New',monospace;background:%s;"
-                "color:%s;padding:2px 6px;border-radius:4px;}"
+                "color:%s;padding:2px 15px 2px 6px;border-radius:4px;}"
                 % (self.window.palette["surface2"], self.window.palette["text"]))
             badge = QLabel("\u2713", pill)
+            badge.setFixedSize(11, 13)
+            badge.setAlignment(Qt.AlignCenter)
             badge.setStyleSheet("QLabel{color:#22c55e;background:transparent;"
-                                "font-weight:700;font-size:10px;}")
-            badge.move(max(2, pill.width() - 16), 1)
+                                "font-weight:700;font-size:9px;}")
+            badge.move(max(2, pill.width() - 14), 2)
+            badge.raise_()
             badge.hide()
             badge.setAttribute(Qt.WA_TransparentForMouseEvents)
             pill._badge = badge
@@ -3047,8 +3051,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         self.data_label.setObjectName("help")
         layout.addWidget(self.data_label)
         self._refresh_data_label()
-        self._help(layout, "games.json, config.json and stats.db live next to main.py. "
-                           "Put your old files there and press Reload.")
+        self._help(layout, tr("games.json, config.json and stats.db live in "
+                              "%APPDATA%\\HyggerPresence. Put your old files there "
+                              "and press Reload."))
         data_row = QHBoxLayout()
         reload_button = QPushButton("Reload data")
         reload_button.clicked.connect(self._reload_data)
@@ -3079,6 +3084,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             pass
         # re-translate the live window: no restart needed
         i18n.apply_language(code, root=self.window)
+        if hasattr(self, "refresh_variables"):
+            self.refresh_variables()
         self._retranslate_tabs()
 
     def _title_mode_changed(self, index):

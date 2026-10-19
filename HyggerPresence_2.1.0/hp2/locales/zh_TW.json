@@ -280,6 +280,7 @@
   "Which name the Library list shows for each game.": "藏書庫清單顯示哪個名稱。",
   "You are up to date (%s).": "已是最新版本（%s）。",
   "You chose “skip this version” for a release. This forgets that, so you get told about it again.": "你曾對某個版本選擇「跳過此版本」。這會清除該記錄，之後會再提醒你。",
+  "games.json, config.json and stats.db live in %APPDATA%\\HyggerPresence. Put your old files there and press Reload.": "games.json、config.json、stats.db 位於 %APPDATA%\\HyggerPresence。把舊檔案放進去，再按「重新載入資料」。",
   "games.json, config.json and stats.db live next to main.py. Put your old files there and press Reload.": "games.json、config.json 與 stats.db 位於 main.py 旁邊。把舊檔放進去後按「重新載入」。",
   "show": "顯示",
   "{developer} – developer name": "{developer} – 開發商",
