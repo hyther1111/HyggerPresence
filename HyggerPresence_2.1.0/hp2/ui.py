@@ -1886,17 +1886,7 @@ class ScreenshotSettingsMixin:
         layout.addLayout(row)
         self._help(layout, tr("One folder per game, named after the title."))
 
-        layout.addSpacing(12)
-        layout.addWidget(QLabel(tr("Screenshot title")))
-        self.shot_title_mode = QComboBox()
-        self.shot_title_mode.addItems([tr("Original title"), tr("Romanised title")])
-        current = (opts.get("title_mode")
-                   or self.window.config.get("library_title_mode") or "original")
-        self.shot_title_mode.setCurrentIndex(1 if current == "romanized" else 0)
-        self.shot_title_mode.currentIndexChanged.connect(self._shot_title_changed)
-        layout.addWidget(self.shot_title_mode)
 
-        layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Hotkey")))
         line = QHBoxLayout()
         line.addWidget(QLabel(tr("Capture the active window")))
@@ -1915,14 +1905,6 @@ class ScreenshotSettingsMixin:
 
         layout.addStretch(1)
         return page
-
-    def _shot_title_changed(self, index):
-        mode = "romanized" if index == 1 else "original"
-        opts = self.window.config.setdefault("screenshot", {})
-        opts["title_mode"] = mode
-        store.save_config(self.window.config)
-        if hasattr(self.window, "shots_page"):
-            self.window.shots_page.refresh()
 
     def _bind_hotkey_click(self, event):
         self.window.start_hotkey_capture(self.shot_hotkey)
@@ -1948,20 +1930,24 @@ def default_pictures():
 
 
 class ScreenshotPage(Page):
+    """games -> folder -> one screenshot, all in the same page."""
+
     COVER = (150, 200)
     THUMB = (300, 170)
 
     def __init__(self, window):
         super().__init__(window)
         from PySide6.QtWidgets import QScrollArea
-        self._view, self._folder, self._cards = "games", "", {}
+        self._view, self._folder, self._shot = "games", "", None
+        self._cards = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
         outer.setSpacing(10)
+
         head = QHBoxLayout()
         head.setSpacing(8)
         self.back_button = QPushButton(tr("Back"))
-        self.back_button.clicked.connect(self.show_games)
+        self.back_button.clicked.connect(self.go_back)
         self.back_button.setVisible(False)
         head.addWidget(self.back_button)
         self.title_label = QLabel(tr("Screenshots"))
@@ -1977,17 +1963,53 @@ class ScreenshotPage(Page):
         self.search.setFixedWidth(220)
         head.addWidget(self.search)
         outer.addLayout(head)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(self.scroll, 1)
+
+        # single screenshot view
+        self.single = QWidget()
+        single_lay = QVBoxLayout(self.single)
+        single_lay.setContentsMargins(0, 0, 0, 0)
+        single_lay.setSpacing(10)
+        self.shot_image = QLabel()
+        self.shot_image.setAlignment(Qt.AlignCenter)
+        single_lay.addWidget(self.shot_image, 1)
+        self.shot_info = QLabel("")
+        self.shot_info.setObjectName("sub")
+        single_lay.addWidget(self.shot_info)
+        row = QHBoxLayout()
+        copy = QPushButton(tr("Copy"))
+        copy.clicked.connect(self._copy_shot)
+        row.addWidget(copy)
+        open_it = QPushButton(tr("Open"))
+        open_it.clicked.connect(self._open_shot)
+        row.addWidget(open_it)
+        reveal = QPushButton(tr("Show in folder"))
+        reveal.clicked.connect(self._reveal_shot)
+        row.addWidget(reveal)
+        delete = QPushButton(tr("Delete"))
+        delete.setObjectName("danger")
+        delete.setStyleSheet("QPushButton{background:#b0392f;color:#ffffff;}"
+                             "QPushButton:hover{background:#c9483c;}")
+        delete.clicked.connect(self._delete_shot)
+        row.addWidget(delete)
+        row.addStretch(1)
+        single_lay.addLayout(row)
+        self.single.setVisible(False)
+        outer.addWidget(self.single, 1)
+
         self.empty = QLabel(tr("No screenshots"))
         self.empty.setObjectName("sub")
         self.empty.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.empty)
+
         self.refresh()
 
+    # ------------------------------------------------------------------ helpers
     def _shot_store(self):
         return getattr(self.window, "shot_store", None) or shots.ScreenshotStore()
 
@@ -2004,8 +2026,20 @@ class ScreenshotPage(Page):
         except Exception:
             return None
 
+    @staticmethod
+    def _fast_pixmap(path, size):
+        """Decode straight to the thumbnail size: much faster for big PNGs."""
+        from PySide6.QtGui import QImageReader
+        reader = QImageReader(str(path))
+        reader.setAutoTransform(True)
+        source = reader.size()
+        if source.isValid():
+            scaled = source.scaled(QSize(size[0], size[1]), Qt.KeepAspectRatio)
+            reader.setScaledSize(scaled)
+        image = reader.read()
+        return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+
     def _search_blob(self, folder):
-        """Everything the library would match, so search behaves the same."""
         parts = [folder]
         for game in getattr(self.window.app, "games", []) or []:
             if shots.sanitise(game.get("original") or game.get("title") or "") != folder:
@@ -2017,9 +2051,7 @@ class ScreenshotPage(Page):
         return " ".join(parts).lower()
 
     def _title_mode(self):
-        opts = self.window.config.get("screenshot") or {}
-        return (opts.get("title_mode")
-                or self.window.config.get("library_title_mode") or "original")
+        return (self.window.config.get("library_title_mode") or "original")
 
     def _library_title(self, folder):
         romanise = self._title_mode() == "romanized"
@@ -2046,32 +2078,59 @@ class ScreenshotPage(Page):
     def _columns(self, width, size):
         return max(1, width // (size[0] + 34))
 
+    # -------------------------------------------------------------------- views
     def show_games(self):
-        self._view, self._folder = "games", ""
-        self.back_button.setVisible(False)
-        self.search.setVisible(True)
-        self.title_label.setText(tr("Screenshots"))
-        self.refresh()
+        self._view, self._folder, self._shot = "games", "", None
+        self._fill()
 
     def open_folder(self, folder):
-        self._view, self._folder = "folder", folder
-        self.back_button.setVisible(True)
-        self.search.setVisible(False)
-        self.title_label.setText(self._library_title(folder))
-        self.refresh()
+        self._view, self._folder, self._shot = "folder", folder, None
+        self._fill()
+
+    def open_shot(self, path):
+        self._view, self._shot = "shot", Path(path)
+        self._fill()
+
+    def go_back(self):
+        """Escape / Back: one level up."""
+        if self._view == "shot":
+            self.open_folder(self._folder)
+        elif self._view == "folder":
+            self.show_games()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.go_back()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def refresh(self):
         self._fill()
 
+    # --------------------------------------------------------------------- fill
     def _fill(self):
         store_ = self._shot_store()
+        is_shot = self._view == "shot"
+        self.back_button.setVisible(self._view != "games")
+        self.search.setVisible(self._view == "games")
+        self.scroll.setVisible(not is_shot)
+        self.single.setVisible(is_shot)
+        self.empty.setVisible(False)
+
+        if is_shot:
+            self._fill_single()
+            return
+
         host = QWidget()
         grid = QGridLayout(host)
         grid.setSpacing(14)
         grid.setContentsMargins(0, 0, 0, 0)
         self._cards = {}
         width = max(360, self.width() - 60)
+
         if self._view == "games":
+            self.title_label.setText(tr("Screenshots"))
             games = store_.games_with_shots()
             needle = (self.search.text() or "").strip().lower()
             if needle:
@@ -2082,19 +2141,44 @@ class ScreenshotPage(Page):
                 grid.addWidget(self._game_card(folder, count),
                                index // columns, index % columns)
                 self._cards[folder] = True
+            self.empty.setText(tr("No screenshots"))
             self.empty.setVisible(not games)
             grid.setRowStretch(len(games) // columns + 1, 1)
         else:
+            self.title_label.setText(self._library_title(self._folder))
             paths = store_.shots_for(self._folder)
             self.count_label.setText(tr("%d screenshot(s)") % len(paths))
             columns = self._columns(width, self.THUMB)
             for index, path in enumerate(paths):
                 grid.addWidget(self._shot_card(path), index // columns, index % columns)
                 self._cards[str(path)] = True
+            self.empty.setText(tr("No screenshots"))
             self.empty.setVisible(not paths)
             grid.setRowStretch(len(paths) // columns + 1, 1)
+
         self.scroll.setWidget(host)
 
+    def _fill_single(self):
+        path = self._shot
+        self.title_label.setText(path.name if path else "")
+        self.count_label.setText("")
+        if path is None or not path.exists():
+            self.empty.setVisible(True)
+            self.single.setVisible(False)
+            return
+        from PySide6.QtGui import QImageReader
+        reader = QImageReader(str(path))
+        size = reader.size()
+        width = max(320, self.width() - 80)
+        height = max(200, self.height() - 220)
+        scaled = self._fast_pixmap(path, (width, height))
+        self.shot_image.setPixmap(scaled)
+        self.shot_info.setText("%s   \u2022   %d x %d   \u2022   %s"
+                               % (path.name, size.width(), size.height(),
+                                  time.strftime("%Y-%m-%d %H:%M",
+                                                time.localtime(path.stat().st_mtime))))
+
+    # -------------------------------------------------------------------- cards
     def _game_card(self, folder, count):
         card = QFrame()
         card.setObjectName("card")
@@ -2137,83 +2221,44 @@ class ScreenshotPage(Page):
         art.setAlignment(Qt.AlignCenter)
         art.setStyleSheet("QLabel{background:%s;border-radius:4px;}"
                           % self.window.palette["surface2"])
-        pixmap = QPixmap(str(path))
+        pixmap = self._fast_pixmap(path, self.THUMB)
         if not pixmap.isNull():
-            art.setPixmap(pixmap.scaled(self.THUMB[0], self.THUMB[1], Qt.KeepAspectRatio,
-                                        Qt.SmoothTransformation))
+            art.setPixmap(pixmap)
         lay.addWidget(art, 0, Qt.AlignHCenter)
         name = QLabel(path.name)
         name.setObjectName("sub")
         name.setWordWrap(True)
         lay.addWidget(name)
-        card.mouseDoubleClickEvent = lambda _e, p=path: self.preview(p)
+        card.mouseDoubleClickEvent = lambda _e, p=path: self.open_shot(p)
         return card
 
-    def _open(self, path):
-        try:
-            os.startfile(str(path))
-        except Exception:
-            pass
+    # ------------------------------------------------------------------ actions
+    def _copy_shot(self):
+        if self._shot and self._shot.exists():
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setPixmap(QPixmap(str(self._shot)))
 
-    def preview(self, path):
-        """Large view with Copy / Open / Show in folder / Delete."""
-        from PySide6.QtWidgets import QDialog, QApplication as _QApp
-        path = Path(path)
-        dialog = QDialog(self)
-        dialog.setWindowTitle(path.name)
-        dialog.setMinimumSize(900, 620)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(14, 14, 14, 12)
-        layout.setSpacing(10)
+    def _open_shot(self):
+        """Open in whatever the user has associated with PNG (Photos, IrfanView...)."""
+        if self._shot and self._shot.exists():
+            try:
+                os.startfile(str(self._shot))
+            except Exception:
+                pass
 
-        pixmap = QPixmap(str(path))
-        picture = QLabel()
-        picture.setAlignment(Qt.AlignCenter)
-        if not pixmap.isNull():
-            picture.setPixmap(pixmap.scaled(860, 480, Qt.KeepAspectRatio,
-                                            Qt.SmoothTransformation))
-        layout.addWidget(picture, 1)
+    def _reveal_shot(self):
+        if self._shot and self._shot.exists():
+            try:
+                import subprocess
+                subprocess.Popen(["explorer", "/select,", str(self._shot)])
+            except Exception:
+                pass
 
-        info = QLabel("%s   \u2022   %d x %d   \u2022   %s"
-                      % (path.name, pixmap.width(), pixmap.height(),
-                         time.strftime("%Y-%m-%d %H:%M",
-                                       time.localtime(path.stat().st_mtime))))
-        info.setObjectName("sub")
-        layout.addWidget(info)
-
-        buttons = QHBoxLayout()
-        copy = QPushButton(tr("Copy"))
-        copy.clicked.connect(lambda: _QApp.clipboard().setPixmap(pixmap))
-        buttons.addWidget(copy)
-        open_it = QPushButton(tr("Open"))
-        open_it.clicked.connect(lambda: self._open(path))
-        buttons.addWidget(open_it)
-        reveal = QPushButton(tr("Show in folder"))
-        reveal.clicked.connect(lambda: self._reveal(path))
-        buttons.addWidget(reveal)
-        remove = QPushButton(tr("Delete"))
-        def do_delete():
-            shots.ScreenshotStore.delete(path)
-            dialog.accept()
-            self.refresh()
-        remove.clicked.connect(do_delete)
-        buttons.addWidget(remove)
-        buttons.addStretch(1)
-        close = QPushButton(tr("Close"))
-        close.clicked.connect(dialog.accept)
-        buttons.addWidget(close)
-        layout.addLayout(buttons)
-
-        dialog.exec()
-        self.refresh()
-
-    @staticmethod
-    def _reveal(path):
-        try:
-            import subprocess
-            subprocess.Popen(["explorer", "/select,", str(path)])
-        except Exception:
-            pass
+    def _delete_shot(self):
+        if not self._shot:
+            return
+        shots.ScreenshotStore.delete(self._shot)
+        self.open_folder(self._folder)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2289,10 +2334,8 @@ class ScreenshotMixin:
             return
         if not self.game_in_foreground():
             return
-        self.hide()
 
         def grab():
-            self.show()
             pixmap = shots.capture_window()
             if pixmap is None:
                 return
