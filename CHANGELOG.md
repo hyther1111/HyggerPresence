@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.1 - 2026-10-19
+
+### Added
+- **Trim black bars.** Captures drop uniform black borders (left/right or
+  top/bottom), which is what upscalers such as Magpie add when the game keeps
+  its original aspect ratio. On by default; a dark scene is left untouched
+  because both sides have to be solid black before anything is cropped.
+- **Copy to clipboard.** A switch in Settings -> Screenshots puts every capture
+  on the clipboard, ready to paste into Discord or an image editor. Off by
+  default.
+
+### Fixed
+- The self updater no longer passes the PyInstaller `_MEIPASS2` environment to
+  the relaunched executable. That variable pointed at the temporary folder the
+  old process deletes on exit, so an updated build could fail with
+  "Failed to load Python DLL ... python311.dll". The update itself always
+  succeeded; only the automatic restart was affected.
+- Gallery refreshes and clipboard copies now happen on the GUI thread via a
+  signal instead of `QTimer.singleShot` from a worker thread, which never fired.
+
 ## 2.1.0 - 2026-10-19
 
 ### Screenshots (new)

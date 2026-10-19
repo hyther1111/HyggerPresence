@@ -4,8 +4,8 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.1.0** — screenshot gallery, global capture hotkey and a
-rewritten Discord update pipeline.
+Current release: **2.1.1** — screenshot gallery with global hotkey, black bar
+trimming and clipboard copy.
 
 ## Requirements
 
@@ -102,6 +102,8 @@ Settings -> Screenshots:
 | Screenshot folder | Where the gallery lives. Defaults to `Pictures\HyggerPresence`; move it to another drive if you like. |
 | Hotkey | Global shortcut that captures the active window. Click the field, press the combination, press Escape to clear it. Unbound by default. |
 | Sound | Shutter sound played after each capture. Any WAV or MCI supported file (mp3, wma, m4a, flac, ogg); empty uses the Windows sound. |
+| Trim black bars left and right | Removes the solid black borders an upscaler adds when the game keeps its aspect ratio (Magpie, 4:3 games on a 16:9 screen). On by default. |
+| Copy the screenshot to the clipboard | Puts the capture on the clipboard so it can be pasted into Discord or an editor. Off by default. |
 
 Each capture is stored as
 

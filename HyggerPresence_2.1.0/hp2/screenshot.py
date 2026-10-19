@@ -78,6 +78,51 @@ def _write_png(pixmap, path):
         return False
 
 
+def trim_bars(pixmap, threshold=10):
+    """Remove uniform near-black borders, e.g. the pillarbox an upscaler adds.
+
+    Returns the original pixmap when nothing looks like a bar, so a dark scene is
+    never cropped by accident.
+    """
+    if pixmap is None or pixmap.isNull():
+        return pixmap
+    image = pixmap.toImage()
+    width, height = image.width(), image.height()
+    if width < 32 or height < 32:
+        return pixmap
+
+    def dark(value):
+        return ((value >> 16 & 0xFF) <= threshold
+                and (value >> 8 & 0xFF) <= threshold
+                and (value & 0xFF) <= threshold)
+
+    def column_dark(x):
+        step = max(1, height // 64)
+        return all(dark(image.pixel(x, y)) for y in range(0, height, step))
+
+    def row_dark(y):
+        step = max(1, width // 64)
+        return all(dark(image.pixel(x, y)) for x in range(0, width, step))
+
+    left = 0
+    while left < width // 3 and column_dark(left):
+        left += 1
+    right = width - 1
+    while right > width * 2 // 3 and column_dark(right):
+        right -= 1
+    top = 0
+    while top < height // 3 and row_dark(top):
+        top += 1
+    bottom = height - 1
+    while bottom > height * 2 // 3 and row_dark(bottom):
+        bottom -= 1
+
+    if left == 0 and top == 0 and right == width - 1 and bottom == height - 1:
+        return pixmap
+    cropped = pixmap.copy(QRect(left, top, right - left + 1, bottom - top + 1))
+    return cropped if not cropped.isNull() else pixmap
+
+
 class ScreenshotStore:
     """Folder layout and file naming."""
 

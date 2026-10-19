@@ -1221,7 +1221,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.1.0"          # one inset for the title bar, the sidebar and the status bar
+APP_VERSION = "2.1.1"          # one inset for the title bar, the sidebar and the status bar
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -1938,8 +1938,32 @@ class ScreenshotSettingsMixin:
         sound_row.addWidget(clear_sound)
         layout.addLayout(sound_row)
         self._help(layout, tr("WAV file played after each screenshot."))
+
+        layout.addSpacing(12)
+        self.shot_trim = QCheckBox(tr("Trim black bars left and right"))
+        self.shot_trim.setChecked(bool(opts.get("trim_bars", True)))
+        self.shot_trim.toggled.connect(self._trim_changed)
+        layout.addWidget(self.shot_trim)
+        self._help(layout, tr("Useful for upscalers that add bars to keep the "
+                              "original aspect ratio."))
+
+        self.shot_copy = QCheckBox(tr("Copy the screenshot to the clipboard"))
+        self.shot_copy.setChecked(bool(opts.get("copy_clipboard", False)))
+        self.shot_copy.toggled.connect(self._copy_changed)
+        layout.addWidget(self.shot_copy)
+        self._help(layout, tr("Paste straight into Discord or an image editor."))
         layout.addStretch(1)
         return page
+
+    def _trim_changed(self, enabled):
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["trim_bars"] = bool(enabled)
+        store.update_config_section("screenshot", {"trim_bars": bool(enabled)})
+
+    def _copy_changed(self, enabled):
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["copy_clipboard"] = bool(enabled)
+        store.update_config_section("screenshot", {"copy_clipboard": bool(enabled)})
 
     def _pick_sound(self):
         from PySide6.QtWidgets import QFileDialog
@@ -1975,6 +1999,12 @@ class ScreenshotSettingsMixin:
 def default_pictures():
     """Pictures/HyggerPresence - the same folder the store uses."""
     return str(shots.default_base_dir())
+
+
+class ShotSignals(QObject):
+    """Carries a finished capture back to the GUI thread."""
+
+    finished = Signal(object)
 
 
 class ScreenshotPage(Page):
@@ -2761,6 +2791,7 @@ class ScreenshotMixin:
         # No delay: the window does not move away, and a delayed grab used to
         # capture whatever had the focus by then.
         self._capturing = True
+        opts = (self.config.get("screenshot") or {})
         import time as _t
         _started = _t.time()
         pixmap = shots.capture_window()
@@ -2775,7 +2806,18 @@ class ScreenshotMixin:
                 pass
         if pixmap is None:
             return
-        shots.beep((self.config.get("screenshot") or {}).get("sound") or "")
+        if opts.get("trim_bars", True):
+            trimmed = shots.trim_bars(pixmap)
+            if trimmed is not pixmap:
+                try:
+                    debug_log("trimmed %dx%d -> %dx%d"
+                              % (pixmap.width(), pixmap.height(),
+                                 trimmed.width(), trimmed.height()))
+                except Exception:
+                    pass
+                pixmap = trimmed
+        shots.beep(opts.get("sound") or "")
+        copy_after = bool(opts.get("copy_clipboard"))
         title = self.current_game_title() or shots.FOLDER_FALLBACK
         debug_log("capture -> folder %r (engine game %r)"
                   % (title, (self.engine.game or {}).get("title")))
@@ -2794,9 +2836,22 @@ class ScreenshotMixin:
             except Exception:
                 return
             self._capturing = False
-            QTimer.singleShot(0, self._after_screenshot)
+            self.shot_signals.finished.emit(pixmap if copy_after else None)
 
         threading.Thread(target=save_in_background, daemon=True).start()
+
+    def _on_shot_saved(self, pixmap):
+        """GUI thread: clipboard copy plus the deferred gallery refresh."""
+        if pixmap is not None:
+            self._copy_to_clipboard(pixmap)
+        self._after_screenshot()
+
+    def _copy_to_clipboard(self, pixmap):
+        from PySide6.QtWidgets import QApplication
+        try:
+            QApplication.clipboard().setPixmap(pixmap)
+        except Exception:
+            pass
 
     def _after_screenshot(self):
         """Rebuild once, 1.5 s after the last shot, instead of after every one."""
@@ -4703,6 +4758,8 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.shot_store = shots.ScreenshotStore(shot_opts.get("path") or None)
         self.hotkeys = HotkeyManager(self)
         self.hotkeys.triggered.connect(self._on_hotkey)
+        self.shot_signals = ShotSignals(self)
+        self.shot_signals.finished.connect(self._on_shot_saved)
         self._hotkey_state = False
         self._hotkey_timer = QTimer(self)
         self._hotkey_timer.setInterval(50)
