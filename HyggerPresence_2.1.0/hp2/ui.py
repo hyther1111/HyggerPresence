@@ -1206,13 +1206,13 @@ def _short_time(seconds):
 
 EDGE = 16
 
-CARD_QSS = ("QFrame#card{background:%(surface)s;border-radius:8px;border:%(border)s;}"
-            "QFrame#card:hover{background:%(surface2)s;}")
+CARD_QSS = ("QFrame#shotcard{background:%(surface)s;border-radius:8px;border:%(border)s;}"
+            "QFrame#shotcard:hover{background:%(surface2)s;}")
 
 MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(border)s;}"
-            "QMenu::item:disabled{color:%(subtext)s;}"
-            "QMenu::item:disabled:selected{background:transparent;}"
-            "QMenu::item:selected{background:%(accent)s;color:#ffffff;}")
+            "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
+            "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
+            "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
 APP_VERSION = "2.1.0"          # one inset for the title bar, the sidebar and the status bar
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
@@ -2072,6 +2072,9 @@ class ScreenshotPage(Page):
                 if event.key() == Qt.Key_Delete:
                     page.delete_selection()
                     return True
+                if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+                    page.copy_selection()
+                    return True
                 return False
 
         self._escape_filter = _Escape(self)
@@ -2312,7 +2315,7 @@ class ScreenshotPage(Page):
         for key, card in self._cards.items():
             if not hasattr(card, "setStyleSheet"):
                 continue
-            border = ("1px solid %s" % accent) if key in self._selection else "none"
+            border = ("2px solid %s" % accent) if key in self._selection else "none"
             card.setStyleSheet(CARD_QSS % dict(self.window.palette, border=border))
 
     def _apply_selection_style(self):
@@ -2411,6 +2414,10 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
             return
         if event.key() == Qt.Key_Delete:
             self.delete_selection()
+            event.accept()
+            return
+        if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            self.copy_selection()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -2536,7 +2543,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
     # -------------------------------------------------------------------- cards
     def _game_card(self, folder, count):
         card = QFrame()
-        card.setObjectName("card")
+        card.setObjectName("shotcard")
         card.setCursor(Qt.PointingHandCursor)
         card.setFixedWidth(self.COVER[0] + 30)
         card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="none"))
@@ -2568,7 +2575,7 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
 
     def _shot_card(self, path, deferred=False):
         card = QFrame()
-        card.setObjectName("card")
+        card.setObjectName("shotcard")
         card.setCursor(Qt.PointingHandCursor)
         card.setFixedWidth(self.THUMB[0] + 16)
         card.setStyleSheet(CARD_QSS % dict(self.window.palette, border="none"))
@@ -2892,6 +2899,13 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
                 "QLabel{font-family:Consolas,'Courier New',monospace;background:%s;"
                 "color:%s;padding:2px 6px;border-radius:4px;}"
                 % (self.window.palette["surface2"], self.window.palette["text"]))
+            badge = QLabel("\u2713", pill)
+            badge.setStyleSheet("QLabel{color:#22c55e;background:transparent;"
+                                "font-weight:700;font-size:10px;}")
+            badge.move(pill.width() - 12, -4)
+            badge.hide()
+            badge.setAttribute(Qt.WA_TransparentForMouseEvents)
+            pill._badge = badge
             pill.mousePressEvent = lambda _e, tk=token, pl=pill: self._copy_token(tk, pl)
             line.addWidget(pill)
             text = QLabel(explanation)
@@ -2906,8 +2920,11 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(token)
         if pill is not None:
-            pill.setText("\u2713")
-            QTimer.singleShot(700, lambda: pill.setText(token))
+            badge = getattr(pill, "_badge", None)
+            if badge is not None:
+                badge.move(max(0, pill.width() - 12), -3)
+                badge.show()
+                QTimer.singleShot(700, badge.hide)
 
     def refresh_variables(self):
         if not hasattr(self, "_variables_label"):
