@@ -34,17 +34,39 @@ def _claim_single_instance():
     return handle
 
 
+def _wake_running_copy():
+    """Ask the running copy to show its window. -> True when it was told.
+
+    Restoring the window from the outside (ShowWindow on a window that Qt has
+    hidden) left an empty dark frame on screen, so the running process is asked
+    to restore itself instead.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        from hp2 import winframe
+        if winframe.notify_running_copy():
+            return True
+    except Exception:
+        pass
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, "Hygger Presence")
+        if hwnd:
+            user32.ShowWindow(hwnd, 9)      # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def main():
     instance = _claim_single_instance()
     if instance == "exists":
         # another copy owns the mutex: bring it to the front and quit quietly
-        if os.name == "nt":
-            import ctypes
-            user32 = ctypes.windll.user32
-            hwnd = user32.FindWindowW(None, "Hygger Presence")
-            if hwnd:
-                user32.ShowWindow(hwnd, 9)      # SW_RESTORE
-                user32.SetForegroundWindow(hwnd)
+        _wake_running_copy()
         return 0
     app = QApplication(sys.argv)
     app.setApplicationName("Hygger Presence")

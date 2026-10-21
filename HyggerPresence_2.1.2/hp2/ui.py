@@ -10,7 +10,6 @@ same on every machine and never change the layout when the theme flips.
 """
 import os
 import threading
-import threading
 import time
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QCheckBox,
                                QDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox,
+                               QProgressBar,
                                QPushButton, QSizeGrip, QStackedWidget,
                                QListWidget, QListWidgetItem, QTabWidget,
                                QTableWidget, QTableWidgetItem,
@@ -260,6 +260,12 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     QPushButton#danger:pressed {{ background: #9a3232; }}
     QPushButton#primary {{ background: {p['accent']}; color: #ffffff;
                border: none; font-weight: 600; }}
+    /* the update progress bar: the native one is bright green and ignores the
+       theme, so it is drawn from the palette like everything else */
+    QProgressBar {{ background: {p['surface2']}; border: 1px solid {p['border']};
+               border-radius: 7px; text-align: center; color: {p['subtext']};
+               font-size: 8pt; }}
+    QProgressBar::chunk {{ background: {p['accent']}; border-radius: 6px; }}
     QPushButton#nav {{ text-align: left; border: none; border-radius: 8px;
                padding: 9px 12px; background: transparent;
                color: {p['subtext']}; }}
@@ -1221,7 +1227,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.1.1"          # one inset for the title bar, the sidebar and the status bar
+APP_VERSION = "2.1.2"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -2005,6 +2011,13 @@ class ShotSignals(QObject):
     """Carries a finished capture back to the GUI thread."""
 
     finished = Signal(object)
+
+
+class UpdateSignals(QObject):
+    """Carries download progress / the result back to the GUI thread."""
+
+    progress = Signal(int, int)
+    finished = Signal(bool, str, str)      # ok, message, downloaded exe path
 
 
 class ScreenshotPage(Page):
@@ -3138,6 +3151,10 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         self.start_windows = QCheckBox("Start with Windows (minimised to the tray)")
         self.start_windows.setChecked(store.startup_enabled())
         layout.addWidget(self.start_windows)
+        self.startup_label = self._help(
+            layout, "Creates a shortcut in your Startup folder, so the shortcut "
+                    "never piles up: there is only ever one.")
+        self.startup_label.setText(tr("Reading the startup shortcut\u2026"))
 
         self.debug_box = QCheckBox(tr("Debug mode \u2013 write presence_debug.log"))
         self.debug_box.setChecked(bool(config.get("debug_log", False)))
@@ -3251,6 +3268,13 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self._refresh_update_notes()
         except Exception:
             pass
+        try:
+            if getattr(self, "version_label", None) is not None:
+                self.version_label.setText(
+                    "%s %s" % (tr("Current version:"), APP_VERSION))
+            self._refresh_skip_label()
+        except Exception:
+            pass
 
     def _refresh_update_notes(self):
         key = getattr(self, "_update_notes_key", None)
@@ -3263,11 +3287,38 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self.update_notes.setText(tr(value))
         elif kind == "available":
             self.update_notes.setText(tr("Update available"))
+        elif kind == "available_full":
+            version, notes = value
+            text = tr("Version %s is available.") % version
+            if notes:
+                text += "\n" + notes
+            self.update_notes.setText(text)
 
     def _refresh_data_label(self):
         summary = store.data_summary()
         template = tr("Currently loaded: %d game(s), %d session(s)")
         self.data_label.setText(template % (summary["games"], summary["sessions"]))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_startup_label_loaded", False):
+            self._startup_label_loaded = True
+            # one PowerShell call, only the first time the page is opened
+            QTimer.singleShot(0, self._refresh_startup_label)
+
+    def _refresh_startup_label(self):
+        """Show where the Startup shortcut points, so a stale one is obvious."""
+        label = getattr(self, "startup_label", None)
+        if label is None:
+            return
+        target = store.startup_target() if store.startup_enabled() else None
+        if target is None:
+            label.setText(tr("Not set: Hygger Presence does not start with Windows."))
+            return
+        missing = not Path(target).exists()
+        label.setText(
+            (tr("Shortcut points to: %s") + (tr(" (file is missing)" ) if missing else ""))
+            % target)
 
     def _how_to_get_id(self):
         QMessageBox.information(
@@ -3505,7 +3556,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
-        layout.addWidget(QLabel("%s %s" % (tr("Current version:"), APP_VERSION)))
+        self.version_label = QLabel("%s %s" % (tr("Current version:"), APP_VERSION))
+        layout.addWidget(self.version_label)
         self.auto_check = QCheckBox("Check for updates when the app starts")
         self.auto_check.setChecked(bool(self.window.config.get("auto_check", True)))
         layout.addWidget(self.auto_check)
@@ -3532,6 +3584,18 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         self.update_notes.setObjectName("help")
         self.update_notes.setWordWrap(True)
         layout.addWidget(self.update_notes)
+        self.update_progress = QProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        # no text inside the bar: grey-on-accent is unreadable in both themes and
+        # the percentage is already in the label above it
+        self.update_progress.setTextVisible(False)
+        self.update_progress.setFixedHeight(16)
+        self.update_progress.setMaximumWidth(420)
+        self.update_progress.hide()
+        layout.addWidget(self.update_progress)
+        self._update_thread = None
+        self._update_signals = None
         self._help(layout, "Updating replaces this .exe in place; games.json, "
                            "config.json and stats.db are kept.")
         layout.addStretch(1)
@@ -3614,7 +3678,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
     # ------------------------------------------------------------ updates
     def _refresh_skip_label(self):
         skipped = self.window.config.get("skip_version") or ""
-        self.skip_label.setText(tr("Skipped version: %s") % (skipped or "none"))
+        self.skip_label.setText(tr("Skipped version: %s")
+                                % (skipped or tr("none")))
         self.clear_skip_button.setEnabled(bool(skipped))
 
     def clear_skip(self):
@@ -3640,10 +3705,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             return
         if updater.is_newer(info["version"], APP_VERSION):
             self.update_button.setEnabled(True)
-            self._update_notes_key = ("available", None)
-            self.update_notes.setText("Version %s is available.\n%s"
-                                      % (info["version"],
-                                         (info.get("notes") or "")[:400]))
+            notes = (info.get("notes") or "")[:400]
+            self._update_notes_key = ("available_full", (info["version"], notes))
+            self._refresh_update_notes()
         else:
             self.update_button.setEnabled(False)
             self._update_notes_key = ("up_to_date", APP_VERSION)
@@ -3657,10 +3721,97 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         if not asset:
             QMessageBox.warning(self, "Update", "This release has no .exe asset.")
             return
-        ok, message = updater.apply_update(asset)
-        QMessageBox.information(self, "Update", message)
-        if ok:
-            self.window._quit()
+        if not updater.can_self_update():
+            QMessageBox.information(
+                self, "Update",
+                "This build runs from source, so it cannot replace itself.")
+            return
+        if self._update_thread is not None:
+            return                      # a download is already running
+        self._update_signals = UpdateSignals(self)
+        self._update_signals.progress.connect(self._on_update_progress)
+        self._update_signals.finished.connect(self._on_update_done)
+        self.update_button.setEnabled(False)
+        self.check_button.setEnabled(False)
+        self.clear_skip_button.setEnabled(False)
+        self.update_progress.setRange(0, 0)      # busy until the first chunk
+        self.update_progress.show()
+        self.update_notes.setText(tr("Downloading the new version\u2026"))
+        signals = self._update_signals
+
+        def report(received, total):
+            signals.progress.emit(int(received), int(total))
+
+        def worker():
+            try:
+                ok, message, path = updater.download_update(asset, progress=report)
+            except Exception as error:      # never leave the UI waiting
+                ok, message, path = False, "Download failed: %s" % error, None
+            signals.finished.emit(bool(ok), str(message), str(path or ""))
+
+        self._update_thread = threading.Thread(target=worker, daemon=True)
+        self._update_thread.start()
+
+    def _on_update_progress(self, received, total):
+        if total > 0:
+            # a gzipped response can deliver more bytes than its Content-Length,
+            # so hold at 99% until the download really finishes
+            percent = max(0, min(99, received * 100 // total))
+            self.update_progress.setRange(0, 100)
+            self.update_progress.setValue(percent)
+            self.update_notes.setText(
+                tr("Downloading the new version\u2026 %d%%") % percent)
+        else:
+            self.update_progress.setRange(0, 0)
+            self.update_notes.setText(
+                tr("Downloading the new version\u2026 %.1f MB")
+                % (received / (1024.0 * 1024.0)))
+
+    def _on_update_done(self, ok, message, path=""):
+        self._update_thread = None
+        self.check_button.setEnabled(True)
+        self.clear_skip_button.setEnabled(True)
+        if not ok:
+            self.update_progress.hide()
+            self.update_button.setEnabled(True)
+            self._refresh_skip_label()
+            self._update_notes_key = ("text", "Could not install the update.")
+            self.update_notes.setText(tr("Could not install the update."))
+            QMessageBox.warning(self, "Update", message)
+            return
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(100)
+        # the swap runs from the shutdown path, so "later" is a real option:
+        # the .bat only starts once the app is on its way out
+        window = self.window
+        window.app.pending_update = path
+        version = (getattr(window, "update_info", None) or {}).get("version") or ""
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Update ready"))
+        box.setIcon(QMessageBox.Question)
+        box.setText(tr("Version %s has been downloaded.") % version
+                    if version else tr("The new version has been downloaded."))
+        box.setInformativeText(
+            tr("Restart now to install it, or choose Later and it is installed "
+               "the next time you close Hygger Presence."))
+        restart = box.addButton(tr("Restart now"), QMessageBox.AcceptRole)
+        later = box.addButton(tr("Later"), QMessageBox.RejectRole)
+        box.setDefaultButton(later)
+        box.exec()
+        if box.clickedButton() is restart:
+            self.update_notes.setText(tr("Restarting to finish the update\u2026"))
+            QTimer.singleShot(150, window._quit)
+            return
+        self._update_notes_key = (
+            "text", "The update will be installed when you close Hygger Presence.")
+        self.update_notes.setText(
+            tr("The update will be installed when you close Hygger Presence."))
+        window.show_update_hint(tr("Update %s ready") % version if version
+                                else tr("An update is ready"))
+        # the window may well be in the tray at this point: put a dot on the
+        # tray icon so the waiting update cannot be missed
+        window.set_tray_badge(True, tr("Update %s ready") % version if version
+                             else tr("An update is ready"))
 
     # ------------------------------------------------------------ launchers
     def _reload_launchers(self):
@@ -3794,7 +3945,23 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         from .core import set_debug_enabled
         set_debug_enabled(bool(config["debug_log"]))
         if bool(self.start_windows.isChecked()) != store.startup_enabled():
-            store.set_startup(bool(self.start_windows.isChecked()))
+            ok = store.set_startup(bool(self.start_windows.isChecked()))
+            import sys as _sys
+            if ok and self.start_windows.isChecked():
+                # remember what the .lnk points at, so a later launch can tell
+                # whether the shortcut went stale without asking COM every time
+                target = (Path(_sys.executable).resolve()
+                          if getattr(_sys, "frozen", False)
+                          else Path(_sys.argv[0]).resolve())
+                config["startup_exe"] = str(target)
+                store.save_config(config)
+            elif not ok:
+                self.start_windows.setChecked(store.startup_enabled())
+                QMessageBox.warning(
+                    self, tr("Start with Windows"),
+                    tr("Windows did not accept the Startup shortcut. Try again, "
+                       "or add Hygger Presence to shell:startup yourself."))
+        self._refresh_startup_label()
         self._refresh_data_label()
         QMessageBox.information(self, tr("Settings"), tr("Saved."))
 
@@ -4790,6 +4957,13 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.tick()
         self.update_info = None
         QTimer.singleShot(2500, self.startup_update_check)
+        # a Startup shortcut that points at a file which no longer exists would
+        # silently start nothing; this costs one stat() in the normal case
+        try:
+            if store.ensure_startup_entry(self.config):
+                store.save_config(self.config)
+        except Exception:
+            pass
 
         # 1.0.4-style foreground hook: status flips in milliseconds, not seconds
         class _FocusBridge(QObject):
@@ -4860,9 +5034,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self.settings_page.on_update_found(info)
         if info.get("status") != "ok":
             if not silent:
-                QMessageBox.information(self, tr("Check Update"),
-                                        "Could not check for updates.\n%s"
-                                        % info.get("error", ""))
+                QMessageBox.information(
+                    self, tr("Check Update"),
+                    tr("Could not check for updates.\n%s") % info.get("error", ""))
             return
         if not updater.is_newer(info.get("version", "0"), APP_VERSION):
             return
@@ -4872,12 +5046,12 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         if silent and not self.config.get("auto_check", True):
             return
         if silent:
-            self.show_update_hint("Update %s available" % info["version"])
+            self.show_update_hint(tr("Update available") + " " + info["version"])
             return
         answer = QMessageBox.question(
             self, tr("Update available"),
-            "Version %s is available.\n\n%s\n\nUpdate now?"
-            % (info["version"], (info.get("notes") or "")[:400]))
+            tr("Version %s is available.") % info["version"] + "\n\n"
+            + (info.get("notes") or "")[:400] + "\n\n" + tr("Update now?"))
         if answer == QMessageBox.Yes:
             self.settings_page.install_update()
         elif answer == QMessageBox.No and not skipped:
@@ -4890,6 +5064,19 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
     # ------------------------------------------------------------- native frame
     def nativeEvent(self, event_type, message):
+        show_id = winframe.show_window_message()
+        if show_id:
+            import ctypes
+            from ctypes import wintypes
+            try:
+                raw = ctypes.cast(int(message),
+                                  ctypes.POINTER(wintypes.MSG)).contents
+                if raw.message == show_id:
+                    # a second launch asked us to come back from the tray
+                    QTimer.singleShot(0, self._restore_window)
+                    return True, 0
+            except Exception:
+                pass
         handled = winframe.handle_native_event(
             self, event_type, message, title_height=self.title_bar.height() + 2,
             skip_rects=self._caption_buttons())
@@ -5086,12 +5273,46 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         menu = QMenu(self)
         menu.addAction(tr("Open"), self._restore_window)
         self.tray_presence = menu.addAction(tr("Presence: ON"), self._tray_toggle_presence)
+        self.tray_update = menu.addAction(
+            tr("Restart to install the update"), self._restart_for_update)
+        self.tray_update.setVisible(False)
         menu.addSeparator()
         menu.addAction(tr("Quit"), self._quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.show()
         self._refresh_tray_menu()
+
+    def _badged_icon(self, base, size=32):
+        """Tray icon with a red dot: an update is downloaded and waiting."""
+        pixmap = base.pixmap(QSize(size, size))
+        if pixmap.isNull():
+            pixmap = self.style().standardIcon(
+                self.style().SP_ApplicationIcon).pixmap(QSize(size, size))
+        canvas = QPixmap(pixmap.size())
+        canvas.fill(Qt.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.drawPixmap(0, 0, pixmap)
+        dot = max(6.0, size * 0.38)
+        margin = size * 0.04
+        rect = QRectF(size - dot - margin, size - dot - margin, dot, dot)
+        painter.setPen(QPen(QColor("#ffffff"), max(1.0, size * 0.07)))
+        painter.setBrush(QColor("#e5484d"))
+        painter.drawEllipse(rect)
+        painter.end()
+        return QIcon(canvas)
+
+    def set_tray_badge(self, enabled, tooltip=""):
+        """Show/hide the 'update waiting' dot on the tray icon."""
+        if self.tray is None:
+            return
+        base = self._app_icon()
+        self.tray.setIcon(self._badged_icon(base) if enabled else base)
+        if not enabled:
+            self.tray.setToolTip("Hygger Presence")
+        elif tooltip:
+            self.tray.setToolTip("Hygger Presence \u2013 %s" % tooltip)
 
     def show_update_hint(self, message):
         label = getattr(self, "update_hint", None)
@@ -5105,7 +5326,22 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             return
         text = tr("Presence: ON") if self.engine.presence_enabled else tr("Presence: OFF")
         self.tray_presence.setText(text)
-        self.tray.setToolTip("Hygger Presence\n%s" % text)
+        pending = bool(getattr(self.app, "pending_update", None))
+        if getattr(self, "tray_update", None) is not None:
+            self.tray_update.setVisible(pending)
+        lines = ["Hygger Presence", text]
+        if pending:
+            version = (getattr(self, "update_info", None) or {}).get("version") or ""
+            lines.append(tr("Update %s ready") % version if version
+                         else tr("An update is ready"))
+        self.tray.setToolTip("\n".join(lines))
+        if pending:
+            self.set_tray_badge(True)
+
+    def _restart_for_update(self):
+        self.settings_page.update_notes.setText(
+            tr("Restarting to finish the update\u2026"))
+        QTimer.singleShot(150, self._quit)
 
     def _tray_toggle_presence(self):
         self.engine.set_presence_enabled(not self.engine.presence_enabled)
@@ -5118,9 +5354,16 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self._restore_window()
 
     def _restore_window(self):
+        # show() first: a window hidden by the tray is not "minimised", and
+        # showNormal() alone can leave Qt thinking it is still visible, which
+        # paints an empty frame on screen
+        self.show()
         self.showNormal()
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized
+                            | Qt.WindowActive)
         self.raise_()
         self.activateWindow()
+        self.update()
 
     def _quit(self):
         if self.app is not None:
@@ -5317,6 +5560,9 @@ class Application:
         self.engine.games = self.games
         self.engine.on_save = lambda: store.save_games(self.engine.games)
         self.window = None
+        # set once an update has been downloaded; the swap is scheduled in
+        # shutdown() so "Later" really means "when you close the app"
+        self.pending_update = None
 
     def fetch(self, url):
         import requests
@@ -5358,3 +5604,11 @@ class Application:
                 self.stats.close()
         except Exception:
             pass
+        pending = getattr(self, "pending_update", None)
+        if pending:
+            # last thing we do: hand the exe swap to a batch that waits for this
+            # process to disappear (it also relaunches the new version)
+            try:
+                updater.install_on_exit(pending)
+            except Exception:
+                pass

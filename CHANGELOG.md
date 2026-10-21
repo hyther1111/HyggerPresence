@@ -1,15 +1,57 @@
 # Changelog
 
-## 2.2.0 - 2026-10-19
+## 2.1.2 - 2026-10-21
 
 ### Added
-- **Tools tab with a window size tool.** Games that only scale by dragging the
-  corner can be put back to a real resolution: bring the game to the front, pick
-  a preset (1280x720, 1366x768, 1600x900, 1920x1080, 2560x1440) or type a size,
-  press Apply. The window frame is taken into account with
-  `AdjustWindowRectExForDpi`, so 1920x1080 means a 1920x1080 drawing area.
-  Exclusive full screen windows have to be switched to a window first, and a game
-  that enforces its own size may snap back.
+- **"Restart now" or "Later".** When the download finishes the app asks what to
+  do. "Later" keeps the app running and installs the update on the next normal
+  exit, so nothing restarts under you in the middle of a game.
+- **Tray badge for a waiting update.** While a downloaded update waits for the
+  next exit, the tray icon carries a red dot, the tooltip names the version, and
+  the tray menu gains "Restart to install the update".
+
+### Fixed
+- **"Update now" no longer freezes the window.** The release .exe was downloaded
+  on the GUI thread, so the window stopped repainting (Windows showed "not
+  responding") for as long as the download took, with no sign that anything was
+  happening. The download now runs on a background thread: the Updates tab shows
+  a progress bar and "Downloading the new version… 42%", the rest of the app stays
+  usable, and the swap starts from the shutdown path once you pick "Restart now".
+- **A failed swap is no longer silent.** The helper .bat that replaces the exe ran
+  without a console, so if Windows still had the file locked it printed
+  `Update failed.` into a hidden window, waited on `pause` forever and the app
+  never came back. It now retries for up to 20 seconds, then writes
+  `%TEMP%\hygger_update_error.txt` with the reason and where the new exe is.
+- The wait loop uses `ping` instead of `timeout`, which fails immediately when its
+  input is redirected.
+- A download is rejected before the swap if the size differs from the release
+  asset or the file does not start with `MZ`.
+- **Launching the exe again while it sat in the tray opened an empty window.**
+  The second copy restored the window from the outside with `ShowWindow`, and a
+  window that Qt had hidden repainted as a blank dark frame. The second copy now
+  asks the running one (a registered window message) to show itself, so the
+  window comes back fully drawn and focused.
+- The update tab's progress bar is themed (accent fill, rounded, no native
+  green block) and matches both the light and the dark theme. The percentage is
+  no longer drawn inside the bar - grey on accent was unreadable in both themes -
+  it stays in the label above, which also shows the downloaded size while the
+  total is unknown.
+- **The Updates tab follows the language setting.** "Current version", "Skipped
+  version: none", "Version x.y.z is available.", the release notes and the
+  "Update now?" prompt were built once at start-up, so they stayed English (or
+  mixed) until something else happened to refresh them. They are re-rendered
+  whenever the language changes, and the missing strings were translated
+  ("Update now?", "Version %s is available.", "none", "Presence: OFF",
+  "Could not check for updates.").
+- **"Start with Windows" now says what it points at, and repairs itself.** The
+  checkbox only tested whether the Startup shortcut existed, so a shortcut left
+  over from an older folder (or a deleted exe) looked fine while Windows started
+  something else - or nothing. The tab now shows the shortcut target and marks it
+  when the file is gone, and a launch whose shortcut points at a missing file
+  rewrites it to the running exe. The check costs one `stat()` per launch; the
+  target is recorded in `config.json` (`startup_exe`) so COM is not queried every
+  time. Nothing outside the Startup folder is ever touched, and a copy running
+  from `%TEMP%` never adopts the shortcut.
 
 ## 2.1.1 - 2026-10-19
 

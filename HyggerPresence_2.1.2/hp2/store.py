@@ -266,6 +266,72 @@ def startup_enabled():
     return startup_shortcut_path().exists()
 
 
+def startup_target():
+    """Where the Startup shortcut points. -> Path or None.
+
+    Reading a .lnk needs COM, and WScript.Shell is only reachable through
+    PowerShell here, so this costs a few hundred milliseconds: call it from the
+    settings page or when a repair is actually needed, never on every tick.
+    """
+    path = startup_shortcut_path()
+    if not path.exists():
+        return None
+    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%s');"
+              "Write-Output $s.TargetPath" % path)
+    try:
+        done = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=15, creationflags=0x08000000)
+    except Exception:
+        return None
+    target = (done.stdout or "").strip().splitlines()
+    if not target:
+        return None
+    return Path(target[0])
+
+
+def _runs_from_temp(exe):
+    """A copy in %TEMP% is a test build; never point the Startup entry at it."""
+    try:
+        temp = Path(os.environ.get("TEMP") or os.environ.get("TMP") or "")
+        return bool(str(temp)) and temp.resolve() in Path(exe).resolve().parents
+    except Exception:
+        return True
+
+
+def ensure_startup_entry(config):
+    """Repair a Startup shortcut whose target disappeared.
+
+    Cheap by design: the recorded path is compared with the filesystem, so the
+    common case costs one stat() call and nothing else. Nothing is ever moved,
+    renamed or deleted - only the .lnk in the Startup folder is rewritten, and
+    only when the file it points at no longer exists.
+    """
+    if not startup_enabled():
+        return False
+    recorded = config.get("startup_exe")
+    if recorded:
+        if Path(recorded).exists():
+            return False
+    else:
+        # first run after the upgrade: adopt whatever the existing .lnk says
+        found = startup_target()
+        if found is None:
+            return False
+        if found.exists():
+            config["startup_exe"] = str(found)
+            return False
+    # the file the shortcut points at is gone: point it at this build instead
+    if not getattr(sys, "frozen", False):
+        return False
+    if _runs_from_temp(sys.executable):
+        return False
+    if set_startup(True):
+        config["startup_exe"] = str(Path(sys.executable).resolve())
+        return True
+    return False
+
+
 def set_startup(enabled):
     """Create/remove the Startup shortcut (same approach as 1.x)."""
     import subprocess

@@ -8,8 +8,11 @@ Produces a single dist\\HyggerPresence.exe with no console window. Qt modules
 that the application never imports are excluded to keep the file small.
 """
 from pathlib import Path
+import os
 
-APP_DIR = Path(SPECPATH) / "HyggerPresence_2.1.1"
+# HP_APP_DIR lets a test build point at another copy of the sources without
+# editing this file, e.g. set HP_APP_DIR=HyggerPresence_2.1.1_pretest
+APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.1.2")
 ICON = str(APP_DIR / "icon.ico")
 
 datas = [

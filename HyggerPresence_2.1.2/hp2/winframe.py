@@ -79,6 +79,40 @@ def native_snap_enabled():
     return os.environ.get("HYGGER_NO_SNAP", "") not in ("1", "true", "yes")
 
 
+_SHOW_MESSAGE = 0
+
+
+def show_window_message():
+    """Broadcast message id used to ask the running copy to show its window.
+
+    A second launch cannot simply ShowWindow() the existing window: the window
+    is hidden by Qt (close to tray), so Windows repaints an empty frame. Asking
+    the process itself is the only way to get a properly drawn window back.
+    """
+    global _SHOW_MESSAGE
+    if not _SHOW_MESSAGE:
+        try:
+            _SHOW_MESSAGE = int(
+                user32.RegisterWindowMessageW(ctypes.c_wchar_p(
+                    "HyggerPresence_ShowWindow")))
+        except Exception:
+            _SHOW_MESSAGE = 0
+    return _SHOW_MESSAGE
+
+
+def notify_running_copy():
+    """Post the show message to every top level window. -> True if posted."""
+    message = show_window_message()
+    if not message:
+        return False
+    try:
+        # HWND_BROADCAST reaches hidden top level windows too
+        user32.PostMessageW(wintypes.HWND(0xFFFF), message, 0, 0)
+        return True
+    except Exception:
+        return False
+
+
 def apply_native_frame(widget):
     """Turn the frameless window into a native captioned window (invisible frame)."""
     if not native_snap_enabled():
