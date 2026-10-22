@@ -18,7 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import (QDate, QEasingCurve, QEvent, QObject,
                             QPoint, QPointF, QPropertyAnimation, QRect, QRectF,
                             QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath, QPalette,
+from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QFrame, QGridLayout,
@@ -1386,6 +1386,10 @@ EDGE = 16
 
 CARD_QSS = ("QFrame#shotcard{background:%(surface)s;border-radius:8px;border:%(border)s;}"
             "QFrame#shotcard:hover{background:%(surface2)s;}")
+# The Statistics cards carry the same look, so a selected card is drawn by the
+# very same rule: a 2 px accent border and nothing else (no tint, no extra
+# painting) - a second style here is what made the two pages disagree.
+STAT_CARD_QSS = CARD_QSS.replace("#shotcard", "#card")
 
 MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(border)s;}"
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
@@ -2121,6 +2125,12 @@ class StatsPage(Page):
         from .core import format_time
         games = self._rows_as_dicts(rows)
         titles = [game["title"] or game["vndb_id"] for game in games]
+        palette = dict(self.window.palette)
+        if getattr(self, "_card_palette", None) != palette:
+            # the cards carry their colours in an inline stylesheet, so a theme
+            # switch has to rebuild them instead of taking the fast path
+            self._card_palette = palette
+            self._cell_titles = None
         if titles == self._cell_titles and self._cells:
             for game in games:
                 entry = self._cells.get(game["title"] or game["vndb_id"])
@@ -2143,7 +2153,7 @@ class StatsPage(Page):
                 widget.deleteLater()
         cells = {}
         for index, game in enumerate(games):
-            cell = CardFrame()
+            cell = CardFrame(palette)
             layout = QVBoxLayout(cell)
             layout.setContentsMargins(12, 12, 12, 12)
             layout.setSpacing(6)
@@ -2701,16 +2711,24 @@ class ScreenshotPage(Page):
     # -------------------------------------------------------------------- views
     def show_games(self):
         self._view, self._folder, self._shot = "games", "", None
+        self._drop_selection()
         self._fill()
 
     def open_folder(self, folder):
         self._view, self._folder, self._shot = "folder", folder, None
         self._limit = 60
+        self._drop_selection()
         self._fill()
 
     def open_shot(self, path):
         self._view, self._shot = "shot", Path(path)
+        self._drop_selection()
         self._fill()
+
+    def _drop_selection(self):
+        """Changing view invalidates both the selection and what was painted."""
+        self._selection = set()
+        self._painted_selection = set()
 
     def go_back(self):
         """Escape / Back: one level up."""
@@ -2782,15 +2800,10 @@ class ScreenshotPage(Page):
             border = (("2px solid %s" % accent) if key in self._selection
                       else "2px solid transparent")
             card.setStyleSheet(CARD_QSS % dict(self.window.palette, border=border))
-        self._painted_selection = set(self._selection)
-
-    def _apply_selection_style(self):
-        style = self.styleSheet()
-        if "card[selected=\"true\"]" in style:
-            return
-        self.setStyleSheet(style + """
-QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
-""")
+        # only remember keys that really exist: a stale key here made the next
+        # click on that card look like "no change" and the ring never came back
+        self._painted_selection = {key for key in self._selection
+                                   if key in self._cards}
 
     def select_all(self):
         if self._view != "folder":
@@ -3001,6 +3014,11 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
 
         self.scroll.setWidget(host)
         self._watch_paths()
+        # a rebuilt gallery has brand new cards, so what used to be painted no
+        # longer means anything (this is what killed the ring after Back)
+        self._selection &= set(self._cards.keys())
+        self._painted_selection = set()
+        self._paint_selection()
         try:
             from .core import debug_log
             debug_log("gallery %s rebuilt in %.0f ms (%d cards)"
@@ -5523,11 +5541,21 @@ class CardFrame(QFrame):
     clicked = Signal()
     double = Signal()
 
-    def __init__(self):
+    def __init__(self, palette_map=None):
         super().__init__()
         self.setObjectName("card")
         self.setCursor(Qt.PointingHandCursor)
         self._selected = False
+        self._palette_map = dict(palette_map or {})
+        self._apply_style()
+
+    def _apply_style(self):
+        accent = self._palette_map.get("accent", "#5b8def")
+        border = ("2px solid %s" % accent) if self._selected else "2px solid transparent"
+        try:
+            self.setStyleSheet(STAT_CARD_QSS % dict(self._palette_map, border=border))
+        except (KeyError, TypeError):
+            pass
 
     def mousePressEvent(self, event):
         self.clicked.emit()
@@ -5542,33 +5570,9 @@ class CardFrame(QFrame):
         if flag == self._selected:
             return
         self._selected = flag
-        self.setProperty("selected", flag)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self._apply_style()
+        # the inline stylesheet is not always repainted on its own
         self.update()
-
-    def paintEvent(self, event):
-        # The ring is painted here as well as in the stylesheet: a QFrame that
-        # only has a dynamic property sometimes keeps the old border until the
-        # next full repaint, and a 2 px outline on a card full of artwork is easy
-        # to miss, so the selection also gets a tinted background.
-        super().paintEvent(event)
-        if not self._selected:
-            return
-        accent = QColor(self.palette().color(QPalette.Highlight))
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        tint = QColor(accent)
-        tint.setAlpha(28)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(tint)
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 10, 10)
-        pen = QPen(accent)
-        pen.setWidth(2)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 9, 9)
-        painter.end()
 
 
 class _CoverBridge(QObject):
@@ -6314,6 +6318,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.now_page.update_from_engine()
         if hasattr(self, "library_page"):
             self.library_page.update_icons()
+        if hasattr(self, "stats_page"):
+            # the cards keep their colours in an inline stylesheet
+            self.stats_page.refresh()
 
     def request_cover(self, url, callback):
         if not url:

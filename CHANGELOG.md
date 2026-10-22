@@ -43,8 +43,16 @@
 - **The selection ring on a Statistics card disappeared** as soon as a card was
   double clicked to open its sessions: the second press of the double click
   toggled the selection off. A card now stays selected until another card is
-  clicked, and the ring is painted over the card (2 px accent plus a faint tint)
-  so it is visible against cover art.
+  clicked.
+- The Statistics card drew a **second, asymmetric ring** of its own on top of the
+  stylesheet border (thicker on the right and bottom, with a tinted background),
+  which is why it never looked like the selected card in the Screenshots gallery.
+  Statistics cards now use exactly the same rule as the screenshot cards: a 2 px
+  accent border and nothing else, in both themes.
+- Screenshots: after **Back** from a folder the selection could not be made again
+  until another folder was clicked — the page remembered what it had painted for
+  the old cards, so re-selecting the same key looked like "nothing changed". A
+  rebuilt gallery now resets that memory, and changing view drops the selection.
 - **Set… for the screenshot hotkey did nothing** in the previous build: the
   dialog was created without a usable parent window, so clicking the button never
   opened anything. The dialog now centres on the window that asked for it and the
