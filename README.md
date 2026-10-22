@@ -101,6 +101,12 @@ the time in each one is typed in by hand:
 - Ranges: 7 / 30 / 90 days, this and last week, this and last month, this and
   last year, all time, or a custom range chosen in a calendar.
 - Per-visual-novel cards, a bar chart, and a session log per visual novel.
+- Click a card to select it (the ring stays on until another card is clicked);
+  double click it, or right click and pick **Sessions…**, to see that game's
+  sessions.
+- Right click a card for **Delete whole range**, which drops that one game's
+  sessions inside the range on screen after a confirmation — the same deletion the
+  Sessions dialog offers, without opening it first.
 - Delete individual sessions, delete a range for one visual novel, export CSV.
 - Idle time is excluded, so session time, total time and statistics agree.
 

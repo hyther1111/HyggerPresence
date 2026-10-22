@@ -23,6 +23,9 @@
   program upscales (Magpie and friends): those draw outside the game's own window,
   so a window grab would come out wrong. Both hotkeys are polled, so neither is
   registered with Windows and neither steals a key from another program.
+- **Delete whole range** on the right click menu of a Statistics card, next to
+  **Sessions…**: it removes that one visual novel's sessions inside the range on
+  screen, after the same confirmation the Sessions dialog asks.
 
 ### Fixed
 - Binding the screen hotkey also replaced the window hotkey (both dialogs wrote
@@ -34,6 +37,22 @@
   **ROUTES** caption of the Detection card stayed English in the Chinese UI: they
   were built without the translation helper (and the chart caption was re-set on
   every redraw). Both now follow the selected language, like the other captions.
+- The **Sessions** and **All sessions** dialogs stayed English: the window title,
+  the line above the table and the `Date` / `Visual novel` / `Length` / `Started`
+  columns are translated now, so the whole dialog follows the selected language.
+- **The selection ring on a Statistics card disappeared** as soon as a card was
+  double clicked to open its sessions: the second press of the double click
+  toggled the selection off. A card now stays selected until another card is
+  clicked, and the ring is painted over the card (2 px accent plus a faint tint)
+  so it is visible against cover art.
+- **Set… for the screenshot hotkey did nothing** in the previous build: the
+  dialog was created without a usable parent window, so clicking the button never
+  opened anything. The dialog now centres on the window that asked for it and the
+  open/close is written to the debug log.
+- The Screenshots page could keep showing an outdated gallery after a capture
+  taken while the page was hidden: the deferred refresh cleared its dirty flag
+  without rebuilding the page, so the new game folder only appeared after
+  switching pages or restarting.
 
 ### Changed
 - Every page that can overflow — Detection, Statistics, Settings, Screenshots —
@@ -67,16 +86,6 @@
   dialog warns when the combination has no Ctrl, Alt or Shift.
 - Library toolbar order: Add game… comes before Edit…. Edit… is disabled when no
   row is selected.
-
-### Fixed
-- **Set… for the screenshot hotkey did nothing** in the previous build: the
-  dialog was created without a usable parent window, so clicking the button never
-  opened anything. The dialog now centres on the window that asked for it and the
-  open/close is written to the debug log.
-- The Screenshots page could keep showing an outdated gallery after a capture
-  taken while the page was hidden: the deferred refresh cleared its dirty flag
-  without rebuilding the page, so the new game folder only appeared after
-  switching pages or restarting.
 
 ## 2.2.0 - 2026-10-22
 

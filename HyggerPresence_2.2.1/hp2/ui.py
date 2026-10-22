@@ -18,12 +18,12 @@ from pathlib import Path
 from PySide6.QtCore import (QDate, QEasingCurve, QEvent, QObject,
                             QPoint, QPointF, QPropertyAnimation, QRect, QRectF,
                             QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath, QPen,
-                           QPixmap)
+from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath, QPalette,
+                           QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLayout,
-                               QLineEdit, QListWidget, QListWidgetItem,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
                                QMainWindow, QMessageBox, QProgressBar,
                                QPushButton, QSizeGrip, QSpinBox,
                                QStackedWidget, QStyle, QTableWidget,
@@ -2167,6 +2167,9 @@ class StatsPage(Page):
             cell.setProperty("vn_title", title)
             cell.clicked.connect(lambda card=cell: self._select_card(card))
             cell.double.connect(lambda name=title: self.open_sessions_for(name))
+            cell.setContextMenuPolicy(Qt.CustomContextMenu)
+            cell.customContextMenuRequested.connect(
+                lambda pos, card=cell: self._card_menu(card, pos))
             if self._selected_title == title:
                 cell.set_selected(True)
                 self._selected_card = cell
@@ -2182,10 +2185,10 @@ class StatsPage(Page):
         self._sync_visibility()
 
     def _select_card(self, card):
+        # Clicking the card that is already selected keeps it selected: the
+        # second press of a double click used to clear the ring, so the card
+        # looked unselected as soon as you opened its sessions and came back.
         if self._selected_card is card:
-            card.set_selected(False)
-            self._selected_card = None
-            self._selected_title = None
             return
         if self._selected_card is not None:
             self._selected_card.set_selected(False)
@@ -2198,6 +2201,45 @@ class StatsPage(Page):
         dialog = SessionsDialog(self, start.isoformat(), end.isoformat(),
                                 only_title=title)
         dialog.exec()
+        self.refresh()
+
+    def _card_actions(self, title):
+        """What the right click menu on a game card offers."""
+        return [(tr("Sessions\u2026"), lambda: self.open_sessions_for(title)),
+                None,
+                (tr("Delete whole range"), lambda: self.delete_range_for(title))]
+
+    def _card_menu(self, card, pos):
+        """Right click a game card: its sessions, or drop them for this range."""
+        title = card.property("vn_title") or ""
+        if not title:
+            return
+        if self._selected_card is not card:
+            self._select_card(card)
+        menu = QMenu(self)
+        for entry in self._card_actions(title):
+            if entry is None:
+                menu.addSeparator()
+                continue
+            text, slot = entry
+            menu.addAction(text, slot)
+        menu.exec(card.mapToGlobal(pos))
+
+    def delete_range_for(self, title):
+        """Delete every session of one game inside the range on screen."""
+        stats = getattr(self.app, "stats", None)
+        if stats is None:
+            return
+        start, end = self._range()
+        who = "\u201c%s\u201d" % title
+        if QMessageBox.question(
+                self, tr("Delete range"),
+                tr("Delete every session of %s between %s and %s?")
+                % (who, start.isoformat(), end.isoformat())) != QMessageBox.Yes:
+            return
+        stats.delete_range_for(start.isoformat(), end.isoformat(), title)
+        self._selected_card = None
+        self._selected_title = None
         self.refresh()
 
     def _cover_for(self, vndb_id):
@@ -4934,17 +4976,21 @@ class SessionsDialog(QDialog):
         self.day_from = day_from
         self.day_to = day_to
         self.only_title = only_title
-        self.setWindowTitle("Sessions \u2013 %s" % only_title if only_title else "All sessions")
+        self.setWindowTitle(tr("Sessions \u2013 %s") % only_title
+                            if only_title else tr("All sessions"))
         self.resize(640, 460)
         outer = QVBoxLayout(self)
-        head = QLabel(("Sessions of %s between %s and %s" % (only_title, day_from, day_to))
+        head = QLabel((tr("Sessions of %s between %s and %s")
+                       % (only_title, day_from, day_to))
                       if only_title else
-                      "Every reading session between %s and %s" % (day_from, day_to))
+                      tr("Every reading session between %s and %s")
+                      % (day_from, day_to))
         head.setObjectName("sub")
         outer.addWidget(head)
 
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Date", "Visual novel", "Length", "Started"])
+        self.table.setHorizontalHeaderLabels([tr("Date"), tr("Visual novel"),
+                                              tr("Length"), tr("Started")])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
@@ -5481,6 +5527,7 @@ class CardFrame(QFrame):
         super().__init__()
         self.setObjectName("card")
         self.setCursor(Qt.PointingHandCursor)
+        self._selected = False
 
     def mousePressEvent(self, event):
         self.clicked.emit()
@@ -5491,9 +5538,37 @@ class CardFrame(QFrame):
         super().mouseDoubleClickEvent(event)
 
     def set_selected(self, flag):
-        self.setProperty("selected", bool(flag))
+        flag = bool(flag)
+        if flag == self._selected:
+            return
+        self._selected = flag
+        self.setProperty("selected", flag)
         self.style().unpolish(self)
         self.style().polish(self)
+        self.update()
+
+    def paintEvent(self, event):
+        # The ring is painted here as well as in the stylesheet: a QFrame that
+        # only has a dynamic property sometimes keeps the old border until the
+        # next full repaint, and a 2 px outline on a card full of artwork is easy
+        # to miss, so the selection also gets a tinted background.
+        super().paintEvent(event)
+        if not self._selected:
+            return
+        accent = QColor(self.palette().color(QPalette.Highlight))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        tint = QColor(accent)
+        tint.setAlpha(28)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(tint)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 10, 10)
+        pen = QPen(accent)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 9, 9)
+        painter.end()
 
 
 class _CoverBridge(QObject):
