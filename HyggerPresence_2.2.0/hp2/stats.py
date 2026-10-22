@@ -130,11 +130,14 @@ class StatsStore:
             " WHERE day BETWEEN ? AND ? GROUP BY m ORDER BY m", (day_from, day_to))
 
     def by_game(self, day_from, day_to, limit=60):
+        # Grouped by title + VNDB id, not by exe: the same visual novel often
+        # ships several exes (patched, uncensored, voice-fixed), and one card per
+        # exe split the playtime of a single game across two rows.
         return self._query(
-            "SELECT COALESCE(NULLIF(title,''), exe_name, vndb_id, '?'), vndb_id,"
+            "SELECT COALESCE(NULLIF(title,''), MAX(exe_name), vndb_id, '?'), vndb_id,"
             " SUM(seconds), MAX(day), COUNT(*) FROM sessions"
             " WHERE day BETWEEN ? AND ?"
-            " GROUP BY title, vndb_id, exe_name ORDER BY 3 DESC LIMIT ?",
+            " GROUP BY title, vndb_id ORDER BY 3 DESC LIMIT ?",
             (day_from, day_to, limit))
 
     def sessions(self, day_from, day_to, limit=500):

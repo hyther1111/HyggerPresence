@@ -17,12 +17,16 @@ from pathlib import Path
 
 from .core import format_time, debug_log, SMART_TIME_FORMAT
 from .detector import DetectorMixin
-from .winapi import wait_for_process_exit
+from .winapi import snapshot_processes, wait_for_process_exit
 
 MAX_LINE = 128
 RPC_CALL_TIMEOUT = 10.0      # a single Discord call may not take longer
 RPC_LOCK_TIMEOUT = 5.0       # nor may waiting for the rpc lock
-KEEPALIVE = 40.0            # Discord drops an activity that is not refreshed; 1.0.x used 55 s
+KEEPALIVE = 20.0            # Discord allows 5 updates / 20 s; 3 of them as keepalive
+# One process snapshot without the game is not a close: a game that renames its
+# own exe, or a slow Toolhelp snapshot, is back a moment later, and clearing on
+# the first miss made the Discord card vanish for no reason.
+MISSING_GRACE = 2.0
 MIN_PUSH_INTERVAL = 0.8        # floor between two sends
 PUSH_BURST = 5                 # Discord allows 5 updates ...
 PUSH_WINDOW = 20.0             # ... per 20 s, so allow exactly that             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
@@ -38,6 +42,10 @@ def _clip(value, limit=MAX_LINE):
 
 POLL_INTERVAL = 1.0
 SCAN_INTERVAL = 3.0          # 1.0.3 used 3 s; the tick itself is ~0.04 ms
+# A game that closes keeps its session this long, so a restart, a launcher
+# handing over to the engine or a game renaming its own exe continue the same
+# session, while anything slower starts a fresh one.
+SESSION_GRACE = 8.0
 IDLE_THRESHOLD = 60
 
 DEFAULT_TEMPLATES = {
@@ -80,6 +88,7 @@ class Engine(DetectorMixin):
         self._desired = ("none", None)  # latest wanted action, never a queue
         self._watchdog_busy = False
         self._next_push_at = 0.0        # rate-limit backoff
+        self._missing_since = None      # first tick that did not see the game
         self._wake = threading.Event()  # supervisor wakes up immediately
         self._push_token = 0            # guard against late (orphan) sends
         self.pinned_exe = None          # manual override from the UI
@@ -100,9 +109,14 @@ class Engine(DetectorMixin):
         self.last_error = ""
         self._reading_start = None
         self._session_accumulated = 0.0
-        self._session_memory = {}      # exe -> seconds kept while still open
-        self._grace = None             # (deadline, folder, seconds)
-        self._session_exe = None
+        # key -> [seconds, missing_since]: a session belongs to a *running* game,
+        # so switching between two open games never restarts either one. A game
+        # that exits keeps its entry for SESSION_GRACE seconds, which is what lets
+        # a restart, a launcher handing over to the engine or a game renaming its
+        # own exe continue the same session.
+        self._session_memory = {}
+        self._session_games = {}       # key -> game dict (liveness + banking)
+        self._session_key = None
         self._card_shown = False       # True while a card is on the profile
         self._last_sent = 0.0
         self._exit_watch = {}
@@ -253,9 +267,24 @@ class Engine(DetectorMixin):
         return names | set(extra)
 
     def pids_for_game(self, game):
-        """Running pids that belong to this library entry."""
+        """Running pids that belong to this library entry.
+
+        This used to walk psutil.process_iter() and call process.exe() for every
+        process on the machine (about 300 open handles + path resolves) — 10 ms
+        every single tick, i.e. the largest idle cost of the whole app. The
+        detector's Toolhelp snapshot answers the same question from one
+        enumeration and reads an exe path only for processes whose *name* could
+        match, which costs about 0.1 ms while a game is tracked.
+        """
         if not game:
             return set()
+        try:
+            return self.get_game_pids(game)
+        except Exception:
+            return self._pids_for_game_psutil(game)
+
+    def _pids_for_game_psutil(self, game):
+        """Fallback for a Toolhelp failure: the old, slow but portable version."""
         import psutil
         found = set()
         for process in psutil.process_iter(["pid", "name"]):
@@ -276,39 +305,62 @@ class Engine(DetectorMixin):
         return self.pids_for_game(game)
 
     def running_games(self):
-        """[(game, running exe name)] for every library entry running right now."""
-        import psutil
-        by_pid = {}
-        for process in psutil.process_iter(["pid", "name"]):
-            try:
-                by_pid[process.info["pid"]] = process.info.get("name") or ""
-            except Exception:
-                continue
+        """[(game, running exe name)] for every library entry running right now.
+
+        Measured at 114 ms in 2.1.x: it walked psutil.process_iter() once per
+        library entry and called process.exe() for every process, so 12 games
+        meant 3600 handle opens. The pinned-game dropdown calls this every six
+        seconds, which alone kept the app at ~2 % of a core. One Toolhelp
+        snapshot plus the name filter below answers it in ~1 ms.
+        """
+        try:
+            rows = snapshot_processes()
+        except Exception:
+            rows = ()
+        names_now = {name for _pid, _ppid, name in rows if name}
         alive = []
         for game in self.games:
             names = self._names_of(game)
-            folder = Path(game.get("exe", "")).parent if game.get("exe") else None
-            hit = ""
-            for process in psutil.process_iter(["pid", "name"]):
-                try:
-                    name = process.info.get("name") or ""
-                    try:
-                        path = process.exe()
-                    except Exception:
-                        path = None
-                    if self.process_matches(game, name, path):
-                        if (name or "").lower() in names:
-                            hit = name
-                            break
-                        hit = hit or name
-                except Exception:
-                    continue
+            hit = next((name for name in names if name in names_now), "")
+            if not hit:
+                # a differently named exe started from the game's own folder
+                # (patched exe, bundled engine) still belongs to the entry
+                if self.pids_for_game(game):
+                    hit = Path(game.get("exe", "")).name or game.get("title", "")
             if hit:
                 alive.append((game, hit))
         return alive
 
     def set_pin(self, exe_path):
         self.pinned_exe = exe_path or None
+
+    def game_of_window(self, hwnd):
+        """The library entry that owns this window, if any.
+
+        Used by the window-show hook while the app is idle: a game that starts
+        without taking focus should still be picked up within ~120 ms instead of
+        waiting for the 10 s safety probe.
+        """
+        try:
+            from .winapi import get_window_pid
+            import psutil
+            pid = get_window_pid(hwnd)
+            if not pid:
+                return None
+            process = psutil.Process(pid)
+            name = (process.name() or "").lower()
+            if not name:
+                return None
+            try:
+                path = process.exe()
+            except Exception:
+                path = None
+        except Exception:
+            return None
+        for game in self.games:
+            if self.process_matches(game, name, path):
+                return game
+        return None
 
     def _focused_library_game(self):
         """The library game that owns the foreground window, if any."""
@@ -318,15 +370,16 @@ class Engine(DetectorMixin):
             pid = get_foreground_pid()
             if not pid:
                 return None
-            name = (psutil.Process(pid).name() or "").lower()
+            process = psutil.Process(pid)      # one handle, not two
+            name = (process.name() or "").lower()
+            if not name:
+                return None
+            try:
+                path = process.exe()
+            except Exception:
+                path = None
         except Exception:
             return None
-        if not name:
-            return None
-        try:
-            path = psutil.Process(pid).exe()
-        except Exception:
-            path = None
         for game in self.games:
             if self.process_matches(game, name, path):
                 return game
@@ -413,12 +466,36 @@ class Engine(DetectorMixin):
                 debug_log("rpc %s took %.1fs"
                           % (getattr(func, "__name__", "call"), elapsed))
 
+    def _rpc_alive(self):
+        """Best-effort check that the IPC socket still works.
+
+        pypresence has no health check, and a Discord restart closes the pipe
+        without telling us; without this the card stayed missing until the next
+        keepalive reconnected.
+        """
+        presence = self.rpc
+        if presence is None:
+            return False
+        writer = getattr(presence, "sock_writer", None)
+        if writer is None:
+            return False
+        try:
+            return not writer.is_closing()
+        except Exception:
+            return True
+
     def _mark_dead(self, error):
-        debug_log("rpc marked dead: %s" % error)
         """Drop the connection so the next action reconnects from scratch."""
+        debug_log("rpc marked dead: %s" % error)
         self.last_error = "rpc: %s" % error
         lowered = str(error).lower()
         self._next_push_at = time.time() + (60.0 if "rate" in lowered else 3.0)
+        # the card most likely went away with the socket: send it again as soon
+        # as the connection is back instead of waiting for the keepalive
+        self._pushed_identity = None
+        self._pushed_status = None
+        self._card_shown = False
+        self._last_sent = 0.0
         presence, self.rpc = self.rpc, None
         if presence is not None:
             self._close_async(presence)
@@ -509,6 +586,11 @@ class Engine(DetectorMixin):
         try:
             presence.clear()
             self._card_shown = False
+            # the card is gone, so the next tick has to send it again even if the
+            # game and the status did not change (it used to wait for KEEPALIVE,
+            # which is why the profile stayed empty for up to 40 s)
+            self._pushed_identity = None
+            self._pushed_status = None
             self.last_error = ""
         except Exception as error:
             # retried by the next tick while no game is running
@@ -529,36 +611,53 @@ class Engine(DetectorMixin):
                 return True
         return False
 
-    def _grace_resume(self, game):
-        grace = getattr(self, "_grace", None)
-        if not grace:
-            return False
-        started, folder, title, accumulated = grace[:4]
-        gone_exe = grace[4] if len(grace) > 4 else None
-        now = time.time()
-        same_exe = bool(gone_exe) and game.get("exe") == gone_exe
-        # a game often blinks for a second (its own restart); a real close leaves
-        # the exe away for much longer
-        window = 8.0 if same_exe else 15.0
-        if now - started > window:
-            debug_log("grace expired: after %.1fs (same_exe=%s)"
-                      % (now - started, same_exe))
-            self._grace = None
-            return False
-        same_folder = bool(folder) and self._folder_of(game) == folder
-        title_now = (game.get("original") or game.get("title") or "").strip()
-        same_title = bool(title) and bool(title_now) and title == title_now
-        if not (same_folder or same_title):
-            debug_log("grace dropped: new=%s folder=%s title=%s held=%s/%s"
-                      % (game.get("exe"), self._folder_of(game),
-                         (game.get("original") or game.get("title")),
-                         folder, title))
-            return False
-        self._session_accumulated = max(self._session_accumulated, accumulated)
-        debug_log("session resumed: exe=%s secs=%.1f held=%s/%s"
-                  % (game.get("exe"), self._session_accumulated, folder, title))
-        self._grace = None
-        return True
+    def _game_by_key(self, key):
+        """The game dict that belongs to a session key, if it still exists."""
+        if key is None:
+            return None
+        game = self._session_games.get(key)
+        if game is not None:
+            return game
+        for candidate in self.games:
+            if self._game_key(candidate) == key:
+                self._session_games[key] = candidate
+                return candidate
+        return None
+
+    def _session_store(self, key, seconds, missing_since=None):
+        """Remember a game's session so switching back continues it."""
+        if key is None:
+            return
+        self._session_memory[key] = [float(seconds or 0.0), missing_since]
+
+    def _session_forget(self, key):
+        if key is None:
+            return
+        self._session_memory.pop(key, None)
+        self._session_games.pop(key, None)
+
+    def _expire_sessions(self, now):
+        """Drop the sessions of games that stayed closed for SESSION_GRACE.
+
+        A session is only dropped once its process is really gone and has been
+        gone for the whole grace window, so a restart inside the window (or a
+        launcher handing over to the engine) keeps the same session while a real
+        close starts a fresh one.
+        """
+        for key in list(self._session_memory):
+            entry = self._session_memory[key]
+            game = self._session_games.get(key)
+            if entry[1] is None:
+                if game is None:
+                    self._session_forget(key)
+                    continue
+                if self.pids_for_game(game):
+                    continue
+                entry[1] = now          # it just exited: start the grace window
+            if now - entry[1] > SESSION_GRACE:
+                debug_log("session dropped: %s after %.1fs closed"
+                          % (key[0], now - entry[1]))
+                self._session_forget(key)
 
     def _same_game(self, first, second):
         """True when both entries are the same game (e.g. launcher -> engine)."""
@@ -579,43 +678,64 @@ class Engine(DetectorMixin):
                 game.get("title") or game.get("original") or "")
 
     def _apply_clock(self, game, status, now):
-        """1.0.4 behaviour: session belongs to the current game, nothing remembered."""
-        if self._session_exe != self._game_key(game):
-            previous = self._session_exe
+        """Move the session clock to `game`, banking what the last one earned.
+
+        Rules (the behaviour 2.x is supposed to have):
+        - switching between two open games never restarts either session, the
+          one you leave is remembered and continues when you come back;
+        - the time played before the switch is banked into that game's total and
+          into stats.db (it used to be dropped, because the previous game was
+          looked up by exe string while the session key is a tuple);
+        - a closed game keeps its session for SESSION_GRACE seconds only, so a
+          restart inside 8 s continues it and a later restart starts at zero;
+        - if the previous exe is gone and the new one is the same game (a game
+          renaming its own exe, or a launcher handing over to the engine) the
+          session simply continues.
+        """
+        key = self._game_key(game)
+        if self._session_key != key:
+            previous_key = self._session_key
+            previous_game = self._game_by_key(previous_key)
             if self._reading_start is not None:
                 # bank the stretch that is still running before switching away
                 start = self._reading_start
                 segment = max(0.0, now - start)
                 self._reading_start = None
                 self._session_accumulated += segment
-                previous_game = next((g for g in self.games
-                                      if g.get("exe") == previous), None)
                 if previous_game is not None:
                     previous_game["total_seconds"] = \
                         previous_game.get("total_seconds", 0) + segment
                     self._record_segment(previous_game, start, now)
-            exe = game.get("exe")
-            previous_game = next((g for g in self.games
-                                  if g.get("exe") == previous), None)
-            handover = self._same_game(previous_game, game) or self._grace_resume(game)
+            handover = False
+            if previous_key is not None and previous_key != key:
+                previous_gone = (previous_game is None
+                                 or not self.pids_for_game(previous_game))
+                handover = previous_gone and self._same_game(previous_game, game)
             if handover:
-                # the game swapped its own executable: the session continues
-                self._session_memory.pop(previous, None)
-                self._grace = None
-                self._session_exe = self._game_key(game)
-                self._reading_start = None
-                self.session_seconds = self._session_accumulated
-                self.total_seconds = game.get("total_seconds", 0)
+                # same game under a new identity: keep the seconds
+                seconds = self._session_accumulated
+                self._session_forget(previous_key)
+                debug_log("session handover: %s -> %s secs=%.1f"
+                          % (previous_key[0] if previous_key else "",
+                             game.get("exe"), seconds))
+            elif previous_key is not None:
+                # a different game is starting: remember where the last one was
+                still_open = (previous_game is not None
+                              and bool(self.pids_for_game(previous_game)))
+                self._session_store(previous_key, self._session_accumulated,
+                                    None if still_open else now)
+                seconds = None
             else:
-                if previous is not None:
-                    still_open = bool(self.pids_for_game(previous_game)) \
-                        if previous_game else False
-                    if still_open:
-                        self._session_memory[previous] = self._session_accumulated
-                    else:
-                        self._session_memory.pop(previous, None)
-                self._session_exe = self._game_key(game)
-                self._session_accumulated = self._session_memory.pop(exe, 0.0)
+                seconds = None
+            self._session_key = key
+            self._session_games[key] = game
+            if seconds is None:
+                entry = self._session_memory.pop(key, None)
+                if entry and (entry[1] is None or now - entry[1] <= SESSION_GRACE):
+                    seconds = entry[0]
+                else:
+                    seconds = 0.0
+            self._session_accumulated = seconds
             self._reading_start = None
             self.session_seconds = self._session_accumulated
             self.total_seconds = game.get("total_seconds", 0)
@@ -704,29 +824,29 @@ class Engine(DetectorMixin):
 
     def _tick_once(self):
         try:
+            self._expire_sessions(time.time())
             game, pids = self.scan()
             if not game or not pids or not self._pids_alive(pids):
                 if self.game is not None:
+                    now = time.time()
+                    if self._missing_since is None:
+                        self._missing_since = now
+                    if now - self._missing_since < MISSING_GRACE:
+                        # a single snapshot without the game proves nothing: a
+                        # game that swapped its exe is back within a few hundred
+                        # milliseconds, and clearing here wiped the card
+                        debug_log("game missing for %.1fs, waiting for %.1fs"
+                                  % (now - self._missing_since, MISSING_GRACE))
+                        return
                     folder = self._folder_of(self.game)
                     title = (self.game.get("original")
                              or self.game.get("title") or "").strip()
                     self._flush()
-                    # keep the seconds for a moment: the game may swap its own exe
-                    # (launcher -> engine) with a gap of a second or two, and that
-                    # must not restart the session
-                    if self._session_accumulated > 0:
-                        self._grace = (time.time(), folder, title,
-                                       self._session_accumulated,
-                                       self._session_exe)
-                        debug_log("session held: exe=%s folder=%s title=%s secs=%.1f"
-                                  % (self._session_exe, folder, title,
-                                     self._session_accumulated))
-                    else:
-                        self._grace = None
-                    # closing the game resets its session (switching does not)
-                    if self._session_exe is not None:
-                        self._session_memory.pop(self._session_exe, None)
-                    self._session_exe = None
+                    # the session survives SESSION_GRACE seconds, so a game that
+                    # restarts itself (or swaps its exe) continues where it was
+                    self._session_store(self._session_key,
+                                        self._session_accumulated, time.time())
+                    self._session_key = None
                     self._session_accumulated = 0.0
                     self._reading_start = None
                     self.session_seconds = 0.0
@@ -763,6 +883,7 @@ class Engine(DetectorMixin):
             status = self._status_for(game, pids)
             self._ensure_metadata(game)
             now = time.time()
+            self._missing_since = None      # the game is back, cancel the wait
             self._apply_clock(game, status, now)
             self._arm_exit_watch(game, pids)
             current = (now - self._reading_start) if self._reading_start else 0.0
@@ -796,13 +917,15 @@ class Engine(DetectorMixin):
                               % (status, float(self.session_seconds or 0),
                                  float(self._session_accumulated or 0),
                                  "yes" if self._reading_start else "no",
-                                 self._session_exe, self._pushed_status))
+                                 (self._session_key or ("",))[0],
+                                 self._pushed_status))
                 except Exception:
                     pass
             if status_changed and not (stable or first_push):
                 debug_log("status %s waiting: %.1fs of %.1fs settled"
                           % (status, now - candidate[1], STATUS_DEBOUNCE))
             should_push = (identity_changed
+                           or not self._card_shown
                            or (status_changed and (stable or first_push))
                            or now - self._last_sent >= KEEPALIVE)
             if should_push and not (status_changed and not (stable or first_push)):
@@ -941,6 +1064,10 @@ class Engine(DetectorMixin):
     def _do_push_inner(self, kwargs, cover, token, started_at):
         debug_log("connecting: rpc=%s" % ("open" if self.rpc else "closed"))
         """Worker thread: connect if needed, send, fall back, close on failure."""
+        if self.rpc is not None and not self._rpc_alive():
+            debug_log("rpc socket is closed, reconnecting")
+            dead, self.rpc = self.rpc, None
+            self._close_async(dead)
         if not self.rpc and not self.connect():
             return
         presence = self.rpc
@@ -1030,34 +1157,44 @@ class Engine(DetectorMixin):
                     return
             except Exception:
                 continue
-        self._clear()
         self._scan_cache_game = None
         self._scan_cache_time = 0.0
-        self._session_memory.pop(key, None)
-        if self.game and self.game.get("exe") == key:
-            folder = self._folder_of(self.game)
-            title = (self.game.get("original")
-                     or self.game.get("title") or "").strip()
-            self._flush()
-            # the game may be handing over to another exe of its own (launcher ->
-            # engine): keep the seconds for a moment so the session can continue
-            if self._session_accumulated > 0:
-                self._grace = (time.time(), folder, title,
-                               self._session_accumulated, key)
-                debug_log("session held (exit watch fired): exe=%s folder=%s title=%s "
-                          "secs=%.1f" % (key, folder, title,
-                                         self._session_accumulated))
-            # the process watcher noticed the exit first: clear the session here too,
-            # otherwise tick() sees game=None and never resets it
-            self._session_exe = None
-            self._session_accumulated = 0.0
-            self._reading_start = None
-            self.session_seconds = 0.0
-            self.total_seconds = 0.0
-            self.game = None
-            self.status = None
-            self.preview = {}
+        tracked = bool(self.game) and (self.game.get("exe") or "") == key
+        if not tracked:
+            # A game that is not on the profile closed: either one you switched
+            # away from, or the old exe of a handover (a game renaming itself).
+            # The card belongs to another game, so clearing it here made the
+            # status vanish while you were playing something else.
+            debug_log("exit watch: %s is not the tracked game (%s), card kept"
+                      % (key, (self.game or {}).get("exe")))
+            self._expire_sessions(time.time())
             self._notify()
+            return
+        # Another game may still be running: the next tick switches the card
+        # straight over to it, so blanking the profile here would make Discord
+        # show "nothing" for a moment before the other game appears.
+        try:
+            others = [g for g in self.running_games()
+                      if (g.get("exe") or "") != key]
+        except Exception:
+            others = []
+        if others:
+            debug_log("exit watch: %s closed, %d other game(s) still running: "
+                      "switching without clearing" % (key, len(others)))
+            self._flush()
+            self._expire_sessions(time.time())
+            self._notify()
+            return
+        # Do not blank the card yet: a game that hands its window over to an
+        # engine exe (sayagatari_chs.exe -> SiglusEngine.exe) closes the old
+        # process and opens the new one a moment later, and clearing here made
+        # Discord drop and re-add the card in the same second. The tick below
+        # still clears once the game stayed away for MISSING_GRACE.
+        if self._missing_since is None:
+            self._missing_since = time.time()
+        debug_log("exit watch: %s closed, card kept for %.1fs in case of a "
+                  "handover" % (key, MISSING_GRACE))
+        self._notify()
 
     def _notify(self):
         if self.on_change:
@@ -1070,6 +1207,7 @@ class Engine(DetectorMixin):
     def start_focus_hook(self, on_focus):
         """WinEvent foreground hook (same idea as 1.0.4): status flips in ~2 ms."""
         self._hook_stop = threading.Event()
+        self._hook_show = None
         self._hook_on_focus = on_focus
 
         def hook_thread():
@@ -1082,14 +1220,29 @@ class Engine(DetectorMixin):
             except Exception:
                 pass
             EVENT_SYSTEM_FOREGROUND = 0x0003
+            EVENT_OBJECT_SHOW = 0x8002
             WINEVENT_OUTOFCONTEXT = 0x0000
+            WINEVENT_SKIPOWNPROCESS = 0x0002
             PM_REMOVE = 1
             QS_ALLINPUT = 0x04FF
 
             def timer_proc(hWinEventHook, event, hwnd, idObject, idChild,
                            dwEventThread, dwmsEventTime):
+                # EVENT_OBJECT_SHOW fires for every child control too; only a
+                # top level window (idObject 0, no child id) means a game may
+                # have just started, and a tooltip must not wake the engine.
+                if event == EVENT_OBJECT_SHOW:
+                    if idObject != 0 or idChild != 0:
+                        return
                 try:
-                    self._hook_on_focus()
+                    # the window handle lets the idle path check "is this a
+                    # game window?" instead of guessing from the foreground
+                    self._hook_on_focus(hwnd if event == EVENT_OBJECT_SHOW else None)
+                except TypeError:
+                    try:
+                        self._hook_on_focus()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -1098,9 +1251,15 @@ class Engine(DetectorMixin):
                                            wintypes.DWORD, wintypes.DWORD)
             callback = proc_type(timer_proc)
             self._hook_callback = callback        # keep alive
+            flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
             hook = user32.SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
-                                          0, callback, 0, 0, WINEVENT_OUTOFCONTEXT)
-            if not hook:
+                                          0, callback, 0, 0, flags)
+            # A game that starts in the background (windowed launcher, another
+            # monitor) never takes the foreground, so also listen for windows
+            # appearing: this is what lets the idle tick go from 1 s to 10 s.
+            self._hook_show = user32.SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+                                                     0, callback, 0, 0, flags)
+            if not hook and not self._hook_show:
                 return
             try:
                 user32.MsgWaitForMultipleObjectsEx.restype = wintypes.DWORD
@@ -1119,6 +1278,10 @@ class Engine(DetectorMixin):
                         break
             try:
                 user32.UnhookWinEvent(hook)
+            except Exception:
+                pass
+            try:
+                user32.UnhookWinEvent(self._hook_show)
             except Exception:
                 pass
             try:

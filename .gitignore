@@ -49,9 +49,13 @@ backup-*/
 HyggerPresence_2.0.0/
 HyggerPresence_2.1.0/
 HyggerPresence_2.1.1/
+HyggerPresence_2.1.2/
 HyggerPresence_2.2.0/
 
 # Local test builds (never published)
 HyggerPresence_2.1.1_pretest/
 dist_test/
 build_test/
+
+# Local data snapshots made before risky changes
+data_backup-*/

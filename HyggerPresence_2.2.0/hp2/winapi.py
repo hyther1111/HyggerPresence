@@ -20,7 +20,7 @@ _folder_exe_cache = {}
 
 __all__ = [
     "user32", "kernel32", "LASTINPUTINFO", "PROCESSENTRY32W",
-    "get_foreground_pid", "get_idle_seconds", "snapshot_processes",
+    "get_foreground_pid", "get_window_pid", "get_idle_seconds", "snapshot_processes",
     "expire_process_snapshot", "get_parent_map", "get_ancestor_pids", "is_under",
     "folder_exe_names", "wait_for_process_exit",
     "_proc_cache", "_resolve_cache", "_folder_exe_cache",
@@ -97,6 +97,22 @@ def get_foreground_pid(retries=3, delay=0.01):
         if attempt + 1 < retries:
             time.sleep(delay)
     return None
+
+
+def get_window_pid(hwnd):
+    """PID that owns a window handle, or None.
+
+    The window-show hook hands us an HWND; this turns it into the process that
+    created it so the engine can tell a game window from any other popup.
+    """
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    try:
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    except Exception:
+        return None
+    return pid.value or None
 
 
 def get_idle_seconds():

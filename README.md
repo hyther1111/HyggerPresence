@@ -4,8 +4,9 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.1.2** — screenshot gallery with global hotkey, black bar
-trimming, clipboard copy, and an update download that no longer freezes the window.
+Current release: **2.2.0** — screenshot gallery with global hotkey, black bar
+trimming, clipboard copy, an update download that no longer freezes the window,
+and detection that only runs when something actually happens.
 
 ## Requirements
 
@@ -26,7 +27,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.1.2
+cd HyggerPresence/HyggerPresence_2.2.0
 pip install -r requirements.txt
 python main.py
 ```

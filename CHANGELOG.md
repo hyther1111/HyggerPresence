@@ -1,5 +1,87 @@
 # Changelog
 
+## 2.2.0 - 2026-10-22
+
+### Changed
+- **Idle CPU is now a fraction of what it was.** The app used to wake up about
+  eight times a second even with no game running: a 1 second detection tick, a
+  250 ms clock redraw, a 300 ms cover decoder, a 5 second Discord keepalive check
+  and a 6 second rebuild of the running-game dropdown. Detection is now event
+  driven:
+  - A window-show hook was added next to the existing foreground hook, so a game
+    that starts (focused or not) triggers a scan within ~120 ms.
+  - The 1 second tick only does real work while a game is tracked. When idle a
+    single probe still runs every second — the cadence 2.1.2 already had, so
+    detection is never slower than before — but it costs 0.11 ms instead of
+    28 ms, and a window that appears fires the hook for an immediate scan.
+  - The clock redraw is 1 second instead of 250 ms; it counts whole seconds, so
+    three of those four redraws never changed a pixel.
+  - The cover decoder stops as soon as there is nothing left to decode (and a
+    cover that failed to download no longer keeps it polling forever).
+  - The Discord keepalive check runs every 20 seconds instead of 5.
+- **The running-game scan is 180x cheaper.** `running_games()` used to walk
+  `psutil.process_iter()` once per library entry and resolve `process.exe()` for
+  every process on the machine: measured at 112 ms with 12 games, called every
+  6 seconds, i.e. ~1.9% of a core on its own. It now uses one Toolhelp snapshot
+  plus a name filter and takes 0.61 ms. `pids_for_game()` drops from 10 ms to
+  0.44 ms the same way.
+- The running-game dropdown is only rebuilt when its contents actually change,
+  so an open dropdown no longer loses its highlight every six seconds.
+
+### Fixed
+- **A missing `icon.ico` crashed the app at startup.** The fallback used
+  `QStyle.SP_ApplicationIcon`, which PySide6 6 removed (the enums are scoped now)
+  and raised `AttributeError` before the window appeared.
+- **The app could crash at startup with
+  `'MainWindow' object has no attribute 'cover_timer'`.** The screenshot page
+  asks for cover art from its constructor, which runs before the cover timer is
+  created; 2.2.0 started that timer from `request_cover()`, so a screenshot
+  folder whose game had an uncached cover (for example right after "Change
+  cover…") raised before any window was shown. The request now tolerates the
+  timer not existing yet, and any cover asked for that early is picked up as
+  soon as the timer is created.
+- **Statistics no longer splits one game into two cards.** Playtime was grouped
+  by title + VNDB id + exe name, so the same visual novel played through two
+  exes (a patched build, a voice-fixed build) showed up as two entries with the
+  time divided between them. It is grouped by title + VNDB id now, so every exe
+  of the same game counts towards one card.
+- **Closing a game no longer blanks the card when another game is running.**
+  The exit watcher used to clear the presence for *any* game that exited, so
+  closing game A while playing game B wiped B's card (and the watcher also fired
+  for the old exe of a handover, which made the card blink right after launching).
+  Now the card is only cleared when the game on the profile exits *and* nothing
+  else from the library is running; otherwise the presence switches straight to
+  the game that is still running, without passing through the empty state.
+- **A cleared card comes back immediately.** `clear()` left the "already pushed"
+  state behind, so the next push waited for the keepalive and the profile stayed
+  empty; clearing now resets that state and any later tick re-sends.
+- **The card no longer vanishes while a game is open.** One process snapshot that
+  missed the game (a game renaming its own exe, or a slow Toolhelp snapshot) was
+  treated as "the game closed" and cleared the card; the engine now waits two
+  seconds before it believes that. The keepalive also runs every 20 s instead of
+  40 s, a closed Discord pipe is detected and reconnected on the next push
+  (`pypresence` has no health check of its own), and a failed connection resets
+  the pushed state so the card is re-sent instead of waiting for the keepalive.
+- **A game that swaps its own exe no longer makes the card blink.** Games that
+  hand their window over to a shared engine exe (`sayagatari_chs.exe` ->
+  `SiglusEngine.exe`) closed the old process, and the exit watcher cleared the
+  card on the spot; Discord showed the activity drop and come back within a
+  second. The watcher now keeps the card for the same two second window and only
+  clears when nothing came back.
+- **Session time now follows the rules it was supposed to follow.** A session
+  belongs to a running game instead of to "whatever is focused right now":
+  - switching between two open games no longer restarts either session, and the
+    time played before the switch is banked into that game's total and into
+    `stats.db` (it used to be dropped: the previous game was looked up by exe
+    string while the session key is a tuple, so the lookup never matched);
+  - a closed game keeps its session for 8 seconds, so a restart inside that
+    window continues it while a later restart starts from zero;
+  - a game that renames its own exe, or a launcher handing over to the engine,
+    continues the same session because the previous exe is gone and the new one
+    is the same game;
+  - `Paused` stays with the last focused game while the foreground belongs to a
+    non-game window.
+
 ## 2.1.2 - 2026-10-21
 
 ### Added

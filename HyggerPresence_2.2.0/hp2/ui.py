@@ -1175,9 +1175,7 @@ class NowPage(Page):
             running = self.engine.running_games()
         except Exception:
             running = []
-        self.pin_box.blockSignals(True)
-        self.pin_box.clear()
-        self.pin_box.addItem("Auto", "")
+        rows = [("Auto", "")]
         for entry in running:
             try:
                 game, exe_name = entry
@@ -1185,7 +1183,16 @@ class NowPage(Page):
                 game, exe_name = entry, ""
             title = game.get("original") or game.get("title") or game.get("exe")
             label = "%s (%s)" % (title[:40], exe_name or Path(game.get("exe", "")).name)
-            self.pin_box.addItem(label, game.get("exe", ""))
+            rows.append((label, game.get("exe", "")))
+        # Rebuilding an open dropdown every six seconds steals the highlight
+        # from under the mouse, so only touch the widget when the list changed.
+        if rows == getattr(self, "_pin_rows", None):
+            return
+        self._pin_rows = rows
+        self.pin_box.blockSignals(True)
+        self.pin_box.clear()
+        for label, data in rows:
+            self.pin_box.addItem(label, data)
         pinned = self.engine.pinned_exe or ""
         index = self.pin_box.findData(pinned)
         self.pin_box.setCurrentIndex(index if index >= 0 else 0)
@@ -1227,7 +1234,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.1.2"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.2.0"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -4941,19 +4948,28 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             lambda: self.palette is DARK)
         QApplication.instance().installEventFilter(self._dark_filter)
         self._setup_tray()
-        self.timer = QTimer(self)
+        # Detection is event driven: a window-show hook and the foreground hook
+        # both call tick() within ~120 ms, so the only timers left are a slow
+        # safety probe while nothing is tracked and the 1 s tick while a game
+        # runs (it also accumulates the clock). An idle window therefore wakes
+        # up once every IDLE_TICK_MS instead of ten times a second.
+        self._busy = None                       # None until the first tick
+        self.timer = QTimer(self)               # 1 s detection tick (busy only)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(1000)
-        # the detection tick is 1 s; the clock in the UI must not be
+        self.idle_timer = QTimer(self)          # cheap "did a game appear?" probe
+        self.idle_timer.timeout.connect(self.tick)
+        # the clock in the UI counts whole seconds, so 250 ms bought nothing
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self.refresh_clock_display)
-        self.clock_timer.start(250)
         self.presence_timer = QTimer(self)
         self.presence_timer.timeout.connect(self.engine.ensure_presence)
-        self.presence_timer.start(5000)
+        self.presence_timer.start(20000)
         self.cover_timer = QTimer(self)
         self.cover_timer.timeout.connect(self.drain_covers)
-        self.cover_timer.start(300)
+        if self._cover_callbacks or self.app.cover_bytes:
+            # a page built during __init__ already asked for covers, before this
+            # timer existed: pick those up instead of leaving them undrawn
+            self.cover_timer.start(300)
         self.tick()
         self.update_info = None
         QTimer.singleShot(2500, self.startup_update_check)
@@ -4967,7 +4983,10 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
         # 1.0.4-style foreground hook: status flips in milliseconds, not seconds
         class _FocusBridge(QObject):
-            fired = Signal()
+            # The hook runs on its own thread, so the event is handed to the GUI
+            # thread through a signal. It carries the window handle because the
+            # focused window is the cheapest way to see which game came up.
+            fired = Signal(object)
 
         self._focus_bridge = _FocusBridge(self)
         self._focus_bridge.fired.connect(self._focus_changed)
@@ -5255,7 +5274,10 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             if not icon.isNull():
                 return icon
         from PySide6.QtWidgets import QStyle
-        return self.style().standardIcon(QStyle.SP_ApplicationIcon)
+        # QStyle.SP_ApplicationIcon is gone in PySide6 6.x: the enums are
+        # scoped now, and the un-scoped name raised AttributeError whenever
+        # icon.ico was missing.
+        return self.style().standardIcon(QStyle.StandardPixmap.SP_ApplicationIcon)
 
     def _setup_icon(self):
         icon = self._app_icon()
@@ -5287,8 +5309,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         """Tray icon with a red dot: an update is downloaded and waiting."""
         pixmap = base.pixmap(QSize(size, size))
         if pixmap.isNull():
+            from PySide6.QtWidgets import QStyle
             pixmap = self.style().standardIcon(
-                self.style().SP_ApplicationIcon).pixmap(QSize(size, size))
+                QStyle.StandardPixmap.SP_ApplicationIcon).pixmap(QSize(size, size))
         canvas = QPixmap(pixmap.size())
         canvas.fill(Qt.transparent)
         painter = QPainter(canvas)
@@ -5431,6 +5454,11 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         if url in self.app.cover_pending:
             return
         self.app.cover_pending.add(url)
+        # the drain timer only runs while something is actually pending; pages are
+        # built before this timer exists, so their first cards arrive here first
+        timer = getattr(self, "cover_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start(300)
 
         def worker():
             try:
@@ -5459,9 +5487,22 @@ class MainWindow(ScreenshotMixin, QMainWindow):
                     callback(url, self.app.cover_cache[url])
                 except Exception:
                     pass
+            elif url not in self.app.cover_bytes and url not in self.app.cover_pending:
+                # the worker finished without pixels (404, offline, broken
+                # jpeg). Give up on it: keeping the callback would keep the
+                # drain timer polling every 300 ms for the rest of the session,
+                # which is exactly the kind of idle wakeup 2.2.0 removes.
+                self._cover_callbacks.pop(url, None)
+                try:
+                    callback(url, None)
+                except Exception:
+                    pass
+        # nothing left to decode: stop waking up three times a second
+        if not self._cover_callbacks and not self.app.cover_bytes:
+            self.cover_timer.stop()
 
     def refresh_clock_display(self):
-        """Recount session/total every 250 ms without running detection."""
+        """Recount session/total once a second without running detection."""
         engine = self.engine
         if not self.now_page.isVisible():
             return
@@ -5474,10 +5515,52 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         engine.total_seconds = engine.game.get("total_seconds", 0) + current
         self.now_page.update_from_engine()
 
-    def _focus_changed(self):
-        """Coalesce a burst of focus events into a single tick."""
+    def _focus_changed(self, hwnd=None):
+        """Coalesce a burst of focus events into a single tick.
+
+        `hwnd` is only passed for window-show events. While idle it tells us
+        which window just appeared, so a game that starts in the background is
+        detected immediately and a browser popup is ignored.
+        """
+        if self._busy is False:
+            try:
+                if hwnd:
+                    if self.engine.game_of_window(hwnd) is None:
+                        return
+                elif self.engine._focused_library_game() is None:
+                    return
+            except Exception:
+                pass
         if not self._focus_timer.isActive():
             self._focus_timer.start()
+
+    BUSY_TICK_MS = 1000
+    # A hook normally decides this in milliseconds, but hooks do not fire on
+    # every setup (remote desktop, some fullscreen games, a broken WinEvent
+    # provider), so this probe is the safety net. It stays at 1 s - the cadence
+    # 2.1.2 already had - because a tick without a tracked game costs 0.11 ms
+    # (the old one cost 28 ms, which is where the idle CPU went).
+    IDLE_TICK_MS = 1000
+
+    def _adapt_timers(self):
+        """Pick the timer set that matches the current state.
+
+        Busy (a game is tracked): 1 s tick + 1 s clock.
+        Idle: one cheap probe every IDLE_TICK_MS (1 s); a window that appears
+        also fires the hook, so detection is usually immediate.
+        """
+        busy = self.engine.game is not None
+        if busy == self._busy:
+            return
+        self._busy = busy
+        if busy:
+            self.idle_timer.stop()
+            self.timer.start(self.BUSY_TICK_MS)
+            self.clock_timer.start(self.BUSY_TICK_MS)
+        else:
+            self.timer.stop()
+            self.clock_timer.stop()
+            self.idle_timer.start(self.IDLE_TICK_MS)
 
     def tick(self):
         self.engine.tick()
@@ -5491,6 +5574,7 @@ class MainWindow(ScreenshotMixin, QMainWindow):
                 self.status_label.setToolTip("")
         else:
             self.status_label.setText(self.engine.status or "")
+        self._adapt_timers()
 
     def add_game_dialog(self):
         from PySide6.QtWidgets import QFileDialog, QInputDialog
