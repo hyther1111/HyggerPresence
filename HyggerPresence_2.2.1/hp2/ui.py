@@ -9,24 +9,26 @@ Icons are painted with QPainter (sun / moon / window buttons) so they look the
 same on every machine and never change the layout when the theme flips.
 """
 import os
+import re
+import subprocess
 import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import (QDate, QEasingCurve, QEvent, QObject, QPoint,
-                            QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer,
-                            Signal)
+from PySide6.QtCore import (QDate, QEasingCurve, QEvent, QObject,
+                            QPoint, QPointF, QPropertyAnimation, QRect, QRectF,
+                            QSize, Qt, QTimer, Signal)
 from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath, QPen,
                            QPixmap)
-from PySide6.QtWidgets import (QApplication, QComboBox, QCheckBox,
-                               QDialog,
-                               QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox,
-                               QProgressBar,
-                               QPushButton, QSizeGrip, QStackedWidget,
-                               QListWidget, QListWidgetItem, QTabWidget,
-                               QTableWidget, QTableWidgetItem,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                               QComboBox, QDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QHeaderView, QLabel, QLayout,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QMainWindow, QMessageBox, QProgressBar,
+                               QPushButton, QSizeGrip, QSpinBox,
+                               QStackedWidget, QStyle, QTableWidget,
+                               QTableWidgetItem, QTabWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .engine import Engine, DEFAULT_TEMPLATES
 from . import updater
@@ -35,7 +37,7 @@ from . import i18n
 from .i18n import LANGUAGES, set_language, tr
 from .core import debug_log
 from . import screenshot as shots
-from .hotkey import HotkeyManager, describe, from_qt
+from .hotkey import describe, from_qt
 from . import hotkey as hotkey_mod
 from .stats import StatsStore
 from . import store
@@ -258,6 +260,27 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     QPushButton#danger {{ background: #b23a3a; color: #ffffff; border: none; }}
     QPushButton#danger:hover {{ background: #c94a4a; }}
     QPushButton#danger:pressed {{ background: #9a3232; }}
+    /* small square tool buttons (refresh, +, bin): drawn from the palette, the
+       native Windows look was the odd one out in both themes */
+    QToolButton#flatbtn {{ background: transparent; border: none; border-radius: 6px; }}
+    QToolButton#flatbtn:hover {{ background: {p['surface2']}; }}
+    QToolButton#flatbtn:pressed {{ background: {p['border']}; }}
+    QToolButton#iconbtn {{ background: {p['surface2']}; border: 1px solid {p['border']};
+               border-radius: 7px; }}
+    QToolButton#iconbtn:hover {{ border-color: {p['accent']}; }}
+    QToolButton#iconbtn:pressed {{ background: {p['border']}; }}
+    QToolButton#add {{ background: {p['surface2']}; color: {p['text']};
+               border: 1px solid {p['border']}; border-radius: 7px;
+               font-size: 15px; font-weight: 600; }}
+    QToolButton#add:hover {{ border-color: {p['accent']}; color: {p['accent']}; }}
+    QToolButton#add:pressed {{ background: {p['border']}; }}
+    QToolButton#bin {{ background: transparent; border: 1px solid {p['border']};
+               border-radius: 7px; }}
+    QToolButton#bin:hover {{ background: rgba(178, 58, 58, 0.18); border-color: #b23a3a; }}
+    QToolButton#bin:pressed {{ background: rgba(178, 58, 58, 0.32); }}
+    /* a route row has no surface of its own: it must blend into the card so no
+       darker band is left between the fields */
+    QFrame#routerow {{ background: transparent; border: none; }}
     QPushButton#primary {{ background: {p['accent']}; color: #ffffff;
                border: none; font-weight: 600; }}
     /* the update progress bar: the native one is bright green and ignores the
@@ -666,6 +689,14 @@ class LibraryPage(Page):
         self.search.setFixedWidth(240)
         self.search.textChanged.connect(self.refresh)
         head.addWidget(self.search)
+        # refresh lives next to the search field: the toolbar was getting crowded
+        self.refresh_button = QToolButton()
+        self.refresh_button.setObjectName("flatbtn")
+        self.refresh_button.setToolTip(tr("Refresh list"))
+        self.refresh_button.setCursor(Qt.PointingHandCursor)
+        self.refresh_button.setFixedSize(28, 28)
+        self.refresh_button.setIconSize(QSize(20, 20))
+        head.addWidget(self.refresh_button)
         outer.addLayout(head)
 
         self.table = QTableWidget(0, 3)
@@ -695,19 +726,20 @@ class LibraryPage(Page):
         self.start_button = QPushButton(tr("Start"))
         self.start_button.setObjectName("primary")
         self.start_button.setMenu(self._build_start_menu())
-        self.edit_button = QPushButton(tr("Edit\u2026"))
         self.add_button = QPushButton(tr("Add game\u2026"))
+        self.edit_button = QPushButton(tr("Edit\u2026"))
         self.remove_button = QPushButton(tr("Remove"))
         self.vndb_button = QPushButton(tr("View on VNDB"))
-        self.refresh_button = QPushButton(tr("Refresh list"))
+        self.folder_button = QPushButton(tr("Open in folder"))
+        self.folder_button.setToolTip(tr("Show the game's .exe in Explorer"))
         self.cover_button = QPushButton(tr("Change cover\u2026"))
         self.cover_button.setToolTip(tr("Pick one of the VN covers from VNDB"))
         self.clear_button = QPushButton(tr("Clear presence"))
         self.clear_button.setObjectName("danger")
         self.clear_button.setToolTip(tr("Clear the Discord card now (it comes back on the next tick)"))
-        for button in (self.start_button, self.edit_button, self.add_button,
-                       self.remove_button, self.vndb_button, self.refresh_button,
-                       self.cover_button):
+        for button in (self.start_button, self.add_button, self.edit_button,
+                       self.remove_button, self.vndb_button, self.cover_button,
+                       self.folder_button):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         toolbar.addWidget(self.clear_button)
@@ -717,10 +749,59 @@ class LibraryPage(Page):
         self.edit_button.clicked.connect(self.edit_selected)
         self.remove_button.clicked.connect(self.remove_selected)
         self.vndb_button.clicked.connect(self.open_vndb)
+        self.folder_button.clicked.connect(self.open_in_folder)
         self.refresh_button.clicked.connect(self.refresh)
         self.clear_button.clicked.connect(lambda: self.engine.clear_now())
         self.cover_button.clicked.connect(self.change_cover)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_menu)
+        self.update_icons()
         self.refresh()
+
+    def update_icons(self):
+        """Repaint the small drawn icons in the current theme's text colour."""
+        if hasattr(self, "refresh_button"):
+            colour = self.window.palette["subtext"]
+            self.refresh_button.setIcon(QIcon(reload_pixmap(20, colour)))
+        # the play time of the row that is running changes every second; like
+        # the other pages the list follows it while it is on screen
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(1000)
+        self._live_timer.timeout.connect(self._live_refresh)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_live_timer"):
+            self._live_timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, "_live_timer"):
+            self._live_timer.stop()
+
+    def _live_refresh(self):
+        """Re-render only when a visible number changed."""
+        from .core import format_time
+        wanted = []
+        for game in self.window.visible_games:
+            total = game.get("total_seconds", 0)
+            if self.engine.game is game:
+                total = self.engine.total_seconds
+            wanted.append(format_time(total))
+        shown = [self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+                 for row in range(self.table.rowCount())]
+        if wanted != shown:
+            current = self.selected()
+            self.refresh()
+            if current is not None:
+                self._select_game(current)
+
+    def _select_game(self, game):
+        try:
+            row = self.window.visible_games.index(game)
+        except ValueError:
+            return
+        self.table.selectRow(row)
 
     def display_title(self, game):
         """Library title: original script or romanised, per the setting."""
@@ -893,6 +974,39 @@ class LibraryPage(Page):
             from PySide6.QtCore import QUrl
             QDesktopServices.openUrl(QUrl("https://vndb.org/%s" % game["vndb_id"]))
 
+    def open_in_folder(self):
+        """Reveal the selected game's .exe in Explorer."""
+        game = self.selected()
+        if not game:
+            return
+        target = Path(game.get("exe") or "")
+        if target.is_file():
+            try:
+                # /select, opens the folder with the file highlighted
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            except OSError:
+                os.startfile(str(target.parent))
+            return
+        if target.parent.is_dir():
+            os.startfile(str(target.parent))
+            return
+        QMessageBox.information(self, tr("Open in folder"),
+                                tr("That file is gone:\n%s") % target)
+
+    def _table_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.table.selectRow(row)
+        menu = QMenu(self)
+        menu.addAction(tr("Edit\u2026"), self.edit_selected)
+        menu.addAction(tr("Open in folder"), self.open_in_folder)
+        menu.addAction(tr("View on VNDB"), self.open_vndb)
+        menu.addSeparator()
+        menu.addAction(tr("Remove"), self.remove_selected)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
 
 class NowPage(Page):
     """Info on top, then the Discord preview (what friends see)."""
@@ -912,6 +1026,20 @@ class NowPage(Page):
         self.presence_button.clicked.connect(self.toggle_presence)
         head.addWidget(self.presence_button)
         outer.addLayout(head)
+
+        # Everything under the title scrolls: on a small window the cards are
+        # taller than the page, and a clipped card used to hide its buttons.
+        from PySide6.QtWidgets import QScrollArea
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        host = QWidget()
+        body = QVBoxLayout(host)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        self.scroll.setWidget(host)
+        outer.addWidget(self.scroll, 1)
 
         # ---------------- info card ----------------
         info = QFrame()
@@ -948,7 +1076,9 @@ class NowPage(Page):
         self.session_label.setObjectName("sub")
         column.addWidget(self.session_label)
         self.total_chip = self.total_label
+        column.addSpacing(10)
         column.addStretch(1)
+        column.addSpacing(10)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -961,7 +1091,7 @@ class NowPage(Page):
         actions.addStretch(1)
         column.addLayout(actions)
         row.addLayout(column, 1)
-        outer.addWidget(info)
+        body.addWidget(info)
 
         # ---------------- discord preview ----------------
         preview_card = QFrame()
@@ -1008,7 +1138,7 @@ class NowPage(Page):
         pv_body.addLayout(pv_text, 1)
         pv.addLayout(pv_body)
         self._preview_card = preview_card
-        outer.addWidget(preview_card)
+        body.addWidget(preview_card)
 
         pin_row = QHBoxLayout()
         pin_row.setSpacing(8)
@@ -1021,17 +1151,35 @@ class NowPage(Page):
         self.pin_box.currentIndexChanged.connect(self._pin_changed)
         pin_row.addWidget(self.pin_box)
         pin_row.addStretch(1)
-        outer.addLayout(pin_row)
+        body.addLayout(pin_row)
+
+        # ---------------- routes ----------------
+        routes_card = QFrame()
+        routes_card.setObjectName("card")
+        rc = QVBoxLayout(routes_card)
+        rc.setContentsMargins(16, 12, 16, 16)
+        rc.setSpacing(8)
+        rc_head = QHBoxLayout()
+        rc_caps = QLabel(tr("ROUTES"))
+        rc_caps.setObjectName("caps")
+        rc_head.addWidget(rc_caps)
+        rc_head.addStretch(1)
+        rc.addLayout(rc_head)
+        self.routes_editor = RoutesEditor(self, self.engine, None)
+        rc.addWidget(self.routes_editor)
+        self._routes_card = routes_card
+        body.addWidget(routes_card)
+
         self.diag_label = QLabel("")
         self.diag_label.setObjectName("help")
         self.diag_label.setWordWrap(True)
-        outer.addWidget(self.diag_label)
+        body.addWidget(self.diag_label)
 
         self.state_value = QLabel("")
         self.state_value.setObjectName("help")
         self.state_value.setWordWrap(True)
-        outer.addWidget(self.state_value)
-        outer.addStretch(1)
+        body.addWidget(self.state_value)
+        body.addStretch(1)
         self._pin_stamp = 0.0
 
         self._image_url = ""
@@ -1066,6 +1214,13 @@ class NowPage(Page):
             store.save_games(self.engine.games)
             self.update_from_engine()
 
+    def _refresh_routes(self):
+        """Feed the routes table with the game that is being read."""
+        editor = getattr(self, "routes_editor", None)
+        if editor is None:
+            return
+        editor.set_game(self.engine.game)
+
     # ---------------------------------------------------------- render
     def update_from_engine(self):
         theme = self.window.palette
@@ -1082,6 +1237,7 @@ class NowPage(Page):
             self.status_chip.setText("")
             self.total_label.setText("")
             self.session_label.setText("")
+            self._refresh_routes()
             self.status_chip.setVisible(False)
             self.total_label.setVisible(False)
             self.session_label.setVisible(False)
@@ -1114,6 +1270,7 @@ class NowPage(Page):
             "font-size:8pt;}" % self.window.STATUS_COLOURS.get(status, theme["subtext"]))
         self.total_label.setText(tr("Total read  %s") % format_time(self.engine.total_seconds))
         self.session_label.setText(tr("Session  %s") % format_time(self.engine.session_seconds))
+        self._refresh_routes()
 
         metrics = self.prev_title.fontMetrics()
         width = self._preview_text_width()
@@ -1234,7 +1391,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.2.0"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.2.1"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -1347,6 +1504,167 @@ class BarChart(QWidget):
                              Qt.AlignCenter, label)
 
 
+def trash_pixmap(size=16, colour="#c0453f"):
+    """A small bin, drawn here so it is red in both themes and on every machine."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(colour))
+    pen.setWidthF(1.5)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    unit = size / 16.0
+    # lid, handle and body
+    painter.drawLine(QPointF(3 * unit, 4.5 * unit), QPointF(13 * unit, 4.5 * unit))
+    painter.drawLine(QPointF(6.2 * unit, 4.5 * unit), QPointF(6.8 * unit, 2.9 * unit))
+    painter.drawLine(QPointF(6.8 * unit, 2.9 * unit), QPointF(9.2 * unit, 2.9 * unit))
+    painter.drawLine(QPointF(9.2 * unit, 2.9 * unit), QPointF(9.8 * unit, 4.5 * unit))
+    path = QPainterPath()
+    path.moveTo(4.6 * unit, 6.2 * unit)
+    path.lineTo(5.3 * unit, 13.1 * unit)
+    path.quadTo(5.4 * unit, 13.6 * unit, 5.9 * unit, 13.6 * unit)
+    path.lineTo(10.1 * unit, 13.6 * unit)
+    path.quadTo(10.6 * unit, 13.6 * unit, 10.7 * unit, 13.1 * unit)
+    path.lineTo(11.4 * unit, 6.2 * unit)
+    painter.drawPath(path)
+    # two ribs
+    painter.drawLine(QPointF(6.9 * unit, 7.4 * unit), QPointF(7.1 * unit, 12.3 * unit))
+    painter.drawLine(QPointF(9.1 * unit, 7.4 * unit), QPointF(8.9 * unit, 12.3 * unit))
+    painter.end()
+    return pixmap
+
+
+def reload_pixmap(size=15, colour="#9aa0aa"):
+    """A reload mark: an open circle with an arrowhead, drawn by hand.
+
+    A font glyph turned into an empty box when the icon font was missing, and the
+    style icon was the colourful Windows one, so the shape is painted here. The
+    geometry is in canvas units and then scaled to `size`, which keeps the stroke
+    heavy enough to read at 15-18 px.
+    """
+    import math
+
+    canvas = 64
+    pixmap = QPixmap(canvas, canvas)
+    pixmap.fill(Qt.transparent)
+    colour = QColor(colour)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    centre = canvas / 2.0
+    radius = canvas * 0.30
+
+    def point(deg):
+        rad = math.radians(deg)
+        # screen coordinates: y grows downwards, so the point is (cos, -sin)
+        return (centre + radius * math.cos(rad),
+                centre - radius * math.sin(rad))
+
+    # A polyline instead of drawArc(): Qt measures arcs counter-clockwise in a
+    # y-down system, so the direction (and the arrowhead) flipped.
+    start_deg, span_deg, steps = 55.0, 300.0, 120
+    path = QPainterPath()
+    path.moveTo(QPointF(*point(start_deg)))
+    for step in range(1, steps + 1):
+        path.lineTo(QPointF(*point(start_deg + span_deg * step / steps)))
+    pen = QPen(colour)
+    pen.setWidthF(canvas * 0.115)
+    pen.setCapStyle(Qt.FlatCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    painter.drawPath(path)
+
+    end_deg = start_deg + span_deg
+    tip_x, tip_y = point(end_deg)
+    rad = math.radians(end_deg)
+    sin_a, cos_a = math.sin(rad), math.cos(rad)
+    tan_x, tan_y = -sin_a, -cos_a          # the sweep runs counter-clockwise
+    nor_x, nor_y = cos_a, -sin_a
+    head_len, head_half = canvas * 0.25, canvas * 0.17
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(colour)
+    head = QPainterPath()
+    head.moveTo(tip_x + tan_x * head_len, tip_y + tan_y * head_len)
+    head.lineTo(tip_x + nor_x * head_half, tip_y + nor_y * head_half)
+    head.lineTo(tip_x - nor_x * head_half, tip_y - nor_y * head_half)
+    head.closeSubpath()
+    painter.drawPath(head)
+    painter.end()
+    return pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+class FlowLayout(QLayout):
+    """Left-to-right layout that wraps into as many rows as it needs."""
+
+    def __init__(self, parent=None, margin=0, spacing=12):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(),
+                            margins.top() + margins.bottom())
+
+    def _do_layout(self, rect, test_only=False):
+        margins = self.contentsMargins()
+        left = rect.x() + margins.left()
+        top = rect.y() + margins.top()
+        right = rect.right() - margins.right()
+        x, y = left, top
+        line_height = 0
+        for item in self._items:
+            if item.isEmpty():
+                continue
+            hint = item.sizeHint()
+            if x + hint.width() > right and x > left:
+                x = left
+                y = y + line_height + self._spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._spacing
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
 class StatsPage(Page):
     """Cards + a cover grid (one cell per VN), refreshed every second while visible."""
 
@@ -1359,8 +1677,18 @@ class StatsPage(Page):
         super().__init__(window)
         from .core import format_time
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 16, 20, 16)
-        outer.setSpacing(12)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        # the whole page scrolls, not just the cover grid
+        from PySide6.QtWidgets import QScrollArea
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page_host = QWidget()
+        content = QVBoxLayout(page_host)
+        content.setContentsMargins(20, 16, 20, 16)
+        content.setSpacing(12)
 
         head = QHBoxLayout()
         title = QLabel(tr("Statistics"))
@@ -1395,7 +1723,7 @@ class StatsPage(Page):
         self.export_button = QPushButton("Export CSV\u2026")
         self.export_button.clicked.connect(self.export_csv)
         head.addWidget(self.export_button)
-        outer.addLayout(head)
+        content.addLayout(head)
 
         range_row = QHBoxLayout()
         range_row.setSpacing(6)
@@ -1427,7 +1755,7 @@ class StatsPage(Page):
         range_row.addStretch(1)
         range_row.addWidget(self.range_tool)
         range_row.addWidget(self.all_button)
-        outer.addLayout(range_row)
+        content.addLayout(range_row)
 
         cards = QHBoxLayout()
         cards.setSpacing(12)
@@ -1438,7 +1766,7 @@ class StatsPage(Page):
             card.setObjectName("card")
             layout = QVBoxLayout(card)
             layout.setContentsMargins(14, 12, 14, 12)
-            label = QLabel(caption)
+            label = QLabel(tr(caption))
             label.setObjectName("caps")
             value = QLabel("0s")
             value.setObjectName("metric")
@@ -1446,14 +1774,14 @@ class StatsPage(Page):
             layout.addWidget(value)
             cards.addWidget(card, 1)
             self.card_values[key] = value
-        outer.addLayout(cards)
+        content.addLayout(cards)
 
         chart_card = QFrame()
         chart_card.setObjectName("card")
         chart_layout = QVBoxLayout(chart_card)
         chart_layout.setContentsMargins(14, 10, 14, 6)
         chart_layout.setSpacing(2)
-        self.chart_title = QLabel("PER DAY")
+        self.chart_title = QLabel(tr("PER DAY"))
         self.chart_title.setObjectName("caps")
         chart_layout.addWidget(self.chart_title)
         self.chart = BarChart()
@@ -1463,25 +1791,23 @@ class StatsPage(Page):
         self.legend.setTextFormat(Qt.RichText)
         self.legend.setWordWrap(True)
         chart_layout.addWidget(self.legend)
-        outer.addWidget(chart_card)
+        content.addWidget(chart_card)
 
-        from PySide6.QtWidgets import QScrollArea
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        host = QWidget()
-        self.grid = QGridLayout(host)
-        self.grid.setSpacing(12)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.scroll.setWidget(host)
-        outer.addWidget(self.scroll, 1)
+        self.flow_host = QWidget()
+        self.flow = FlowLayout(self.flow_host, margin=0, spacing=12)
+        content.addWidget(self.flow_host)
         self.empty = QLabel("Nothing recorded in this range yet.")
         self.empty.setObjectName("sub")
         self.empty.setAlignment(Qt.AlignCenter)
-        outer.addWidget(self.empty)
+        content.addWidget(self.empty)
         self.foot = QLabel("")
         self.foot.setObjectName("sub")
-        outer.addWidget(self.foot)
+        content.addWidget(self.foot)
+        # everything sits at the top of the page; the scroll area only grows
+        # once the content is taller than the window
+        content.addStretch(1)
+        self.scroll.setWidget(page_host)
+        outer.addWidget(self.scroll, 1)
 
         self._auto = QTimer(self)
         self._auto.setInterval(500)
@@ -1691,7 +2017,7 @@ class StatsPage(Page):
                         keys.append(key)
             colours = {key: CHART_COLOURS[index % len(CHART_COLOURS)]
                        for index, key in enumerate(keys)}
-            self.chart_title.setText("PER DAY")
+            self.chart_title.setText(tr("PER DAY"))
             self.chart.set_data(
                 [(label[5:], sorted(buckets.get(label, {}).items(),
                                     key=lambda item: -item[1]))
@@ -1807,14 +2133,14 @@ class StatsPage(Page):
             self._sync_visibility()
             return
 
-        # build the whole grid off-screen and swap it in one go: no half-empty
-        # states, no flicker, no stale widgets
-        host = QWidget()
-        grid = QGridLayout(host)
-        grid.setSpacing(12)
-        grid.setContentsMargins(0, 0, 0, 0)
-        for column in range(8):
-            grid.setColumnStretch(column, 1 if column == 7 else 0)
+        # rebuild the cells in one go: no half-empty state, no flicker, no stale
+        # widgets. FlowLayout wraps them into rows at the current width.
+        while self.flow.count():
+            item = self.flow.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
         cells = {}
         for index, game in enumerate(games):
             cell = CardFrame()
@@ -1845,14 +2171,12 @@ class StatsPage(Page):
                 cell.set_selected(True)
                 self._selected_card = cell
             layout.addStretch(1)
-            grid.addWidget(cell, index // 6, index % 6, Qt.AlignTop)
+            self.flow.addWidget(cell)
             url = self._cover_for(game["vndb_id"])
             if url:
                 self.window.request_cover(
                     url, lambda u, image, label=cover: self._apply_cover(label, image))
             cells[title] = (cell, read, share)
-        self.scroll.setWidget(host)          # atomic swap (old host is deleted)
-        self.grid = grid
         self._cells = cells
         self._cell_titles = titles
         self._sync_visibility()
@@ -1924,14 +2248,40 @@ class ScreenshotSettingsMixin:
         self.shot_hotkey = QLineEdit(opts.get("hotkey") or "")
         self.shot_hotkey.setReadOnly(True)
         self.shot_hotkey.setPlaceholderText(tr("Not set"))
-        self.shot_hotkey.mousePressEvent = self._bind_hotkey_click
         line.addWidget(self.shot_hotkey, 1)
+        setter = QPushButton(tr("Set…"))
+        setter.clicked.connect(
+            lambda: self.window.edit_hotkey(self.shot_hotkey,
+                                            apply=self.window.set_hotkey))
+        line.addWidget(setter)
         clear = QPushButton(tr("Clear"))
         clear.clicked.connect(self._clear_hotkey)
         line.addWidget(clear)
         layout.addLayout(line)
-        self._help(layout, tr("Click the field and press a key combination. "
-                              "Escape removes it."))
+        self._help(layout, tr("Set opens a small window: press the combination "
+                              "there and it is shown as you type it. The hotkey "
+                              "only fires while a game is on screen."))
+
+        line = QHBoxLayout()
+        line.addWidget(QLabel(tr("Capture the whole screen")))
+        line.addStretch(1)
+        self.screen_hotkey = QLineEdit(opts.get("screen_hotkey") or "")
+        self.screen_hotkey.setReadOnly(True)
+        self.screen_hotkey.setPlaceholderText(tr("Not set"))
+        line.addWidget(self.screen_hotkey, 1)
+        screen_setter = QPushButton(tr("Set…"))
+        screen_setter.clicked.connect(
+            lambda: self.window.edit_hotkey(self.screen_hotkey,
+                                            apply=self.window.set_screen_hotkey))
+        line.addWidget(screen_setter)
+        screen_clear = QPushButton(tr("Clear"))
+        screen_clear.clicked.connect(self._clear_screen_hotkey)
+        line.addWidget(screen_clear)
+        layout.addLayout(line)
+        self._help(layout, tr("Copies the whole screen instead of the game's "
+                              "window. Use it when the game is upscaled by another "
+                              "program, like Magpie, which draws outside the game's "
+                              "own window. Unbound by default."))
 
         layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Sound")))
@@ -1991,14 +2341,15 @@ class ScreenshotSettingsMixin:
         self.shot_sound.setPlaceholderText(tr("System default"))
         self.window.set_sound("")
 
-    def _bind_hotkey_click(self, event):
-        self.window.start_hotkey_capture(self.shot_hotkey)
-        return QLineEdit.mousePressEvent(self.shot_hotkey, event)
-
     def _clear_hotkey(self):
         self.shot_hotkey.setText("")
         self.shot_hotkey.setPlaceholderText(tr("Not set"))
         self.window.set_hotkey("")
+
+    def _clear_screen_hotkey(self):
+        self.screen_hotkey.setText("")
+        self.screen_hotkey.setPlaceholderText(tr("Not set"))
+        self.window.set_screen_hotkey("")
 
     def _pick_shot_folder(self):
         from PySide6.QtWidgets import QFileDialog
@@ -2061,6 +2412,10 @@ class ScreenshotPage(Page):
         self.search.textChanged.connect(self._fill)
         self.search.setFixedWidth(220)
         head.addWidget(self.search)
+        self.refresh_button = QPushButton(tr("Refresh"))
+        self.refresh_button.setToolTip(tr("Re-read the screenshot folder"))
+        self.refresh_button.clicked.connect(self.refresh_now)
+        head.addWidget(self.refresh_button)
         self.open_folder_button = QPushButton(tr("Open folder"))
         self.open_folder_button.setFixedWidth(120)
         self.open_folder_button.clicked.connect(self._open_current_folder)
@@ -2532,6 +2887,14 @@ QFrame#card[selected=\"true\"] { border:1px solid #5b8def; }
     def refresh(self):
         self._fill()
 
+    def refresh_now(self):
+        """Refresh button: re-read the folder right away, watcher or not."""
+        self._dirty = False
+        self._refresh_timer.stop()
+        if hasattr(self, "_selection"):
+            self._selection.clear()
+        self._fill()
+
     # --------------------------------------------------------------------- fill
     def _fill(self):
         import time as _t3
@@ -2795,7 +3158,8 @@ class ScreenshotMixin:
         except Exception:
             return False
 
-    def take_screenshot(self):
+    def take_screenshot(self, mode="window"):
+        """mode 'window' grabs the game's window, 'screen' the whole screen."""
         if not hasattr(self, "shot_store"):
             return
         import time as _t
@@ -2805,7 +3169,6 @@ class ScreenshotMixin:
                       % (now - getattr(self, "_last_capture_at", 0.0)))
             return
         self._last_capture_at = now
-        capture_opts = (self.config.get("screenshot") or {})
         if not self.game_in_foreground():
             return
 
@@ -2815,13 +3178,13 @@ class ScreenshotMixin:
         opts = (self.config.get("screenshot") or {})
         import time as _t
         _started = _t.time()
-        pixmap = shots.capture_window()
+        pixmap = shots.capture_screen() if mode == "screen" else shots.capture_window()
         if pixmap is None:
             self._capturing = False
         else:
             try:
-                debug_log("capture %dx%d in %.0f ms"
-                          % (pixmap.width(), pixmap.height(),
+                debug_log("capture %s %dx%d in %.0f ms"
+                          % (mode, pixmap.width(), pixmap.height(),
                              (_t.time() - _started) * 1000.0))
             except Exception:
                 pass
@@ -2888,9 +3251,10 @@ class ScreenshotMixin:
         page = getattr(self, "shots_page", None)
         if page is None or not page._dirty:
             return
-        page._dirty = False
         if page.isVisible():
+            page._dirty = False
             page._fill()
+        # hidden: keep _dirty so showEvent() rebuilds when the page comes back
 
     def _push_shot_count(self):
         return 0
@@ -2910,86 +3274,150 @@ class ScreenshotMixin:
         opts = self.config.setdefault("screenshot", {})
         opts["hotkey"] = spec
         store.update_config_section("screenshot", {"hotkey": spec})
-        self._register_hotkey()
+        self._drop_duplicate_combo("hotkey", "screen_hotkey", "screen_hotkey",
+                                   getattr(self, "screen_hotkey", None), spec)
+        self._sync_hotkey_poll()
 
-    def _register_hotkey(self):
-        manager = getattr(self, "hotkeys", None)
-        if manager is None:
+    def set_screen_hotkey(self, spec):
+        opts = self.config.setdefault("screenshot", {})
+        opts["screen_hotkey"] = spec
+        store.update_config_section("screenshot", {"screen_hotkey": spec})
+        self._drop_duplicate_combo("screen_hotkey", "hotkey", "hotkey",
+                                   getattr(self, "shot_hotkey", None), spec)
+        self._sync_hotkey_poll()
+
+    def _drop_duplicate_combo(self, own_field, other_field, other_config_key,
+                              other_widget, spec):
+        """One key cannot mean two things: binding it here clears it over there.
+
+        A build that saved both fields from the same dialog left both combos
+        identical, which made every press take a window shot only.
+        """
+        spec = (spec or "").strip().lower()
+        if not spec:
             return
-        spec = ((self.config.get("screenshot") or {}).get("hotkey") or "").strip()
-        parsed = hotkey_mod.parse(spec) if spec else None
-        if not parsed:
-            manager.release()
-            self._hotkey_timer.stop()
+        opts = self.config.setdefault("screenshot", {})
+        if (opts.get(other_field) or "").strip().lower() != spec:
             return
-        if not manager.is_bound():
-            manager.release()
-            registered = manager.bind("window", parsed[0], parsed[1])
-        else:
-            registered = True
-        if registered:
-            # Windows delivers WM_HOTKEY, the 50 ms poll would fire as well
-            self._hotkey_timer.stop()
-        elif not self._hotkey_timer.isActive():
-            self._hotkey_timer.start()
+        opts[other_field] = ""
+        store.update_config_section("screenshot", {other_config_key: ""})
+        if other_widget is not None:
+            other_widget.setText("")
+            other_widget.setPlaceholderText(tr("Not set"))
+        debug_log("hotkey %r was bound to %s and %s; kept %s"
+                  % (spec, own_field, other_field, own_field))
+
+    def _hotkey_parsed(self):
+        return self._parsed_hotkeys()[0] if self._parsed_hotkeys() else None
+
+    def _parsed_hotkeys(self):
+        """[(action, (modifiers, key))] for every combo that is set."""
+        opts = (self.config.get("screenshot") or {})
+        out = []
+        seen = set()
+        for action, field in (("window", "hotkey"), ("screen", "screen_hotkey")):
+            spec = (opts.get(field) or "").strip()
+            if not spec:
+                continue
+            parsed = hotkey_mod.parse(spec)
+            if not parsed or parsed in seen:
+                continue
+            seen.add(parsed)
+            out.append((action, parsed))
+        return out
+
+    def _sync_hotkey_poll(self):
+        """Poll for the combos only while a game is being tracked.
+
+        Nothing is registered with Windows any more: RegisterHotKey is
+        system-wide, so a bare letter combo swallowed that letter in every
+        program, and the manager stayed bound to the *old* combo after a change
+        (which is why the hotkey only worked after Clear + Set again). Polling
+        costs microseconds and lets the combo be limited to the game window.
+        """
+        timer = getattr(self, "_hotkey_timer", None)
+        if timer is None:
+            return
+        want = bool(self._parsed_hotkeys()) and self.engine.game is not None
+        if want and not timer.isActive():
+            timer.start()
+        elif not want and timer.isActive():
+            timer.stop()
+            self._hotkey_state = {}
 
     def _poll_hotkey(self):
-        spec = ((self.config.get("screenshot") or {}).get("hotkey") or "").strip()
-        parsed = hotkey_mod.parse(spec) if spec else None
-        if not parsed:
+        combos = self._parsed_hotkeys()
+        if not combos:
             return
+        states = getattr(self, "_hotkey_state", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._hotkey_state = states
         try:
             import ctypes
             user32 = ctypes.windll.user32
-            modifiers, key = parsed
-            need = []
-            if modifiers & 0x0002:
-                need.append(0x11)
-            if modifiers & 0x0001:
-                need.append(0x12)
-            if modifiers & 0x0004:
-                need.append(0x10)
-            if modifiers & 0x0008:
-                need.append(0x5B)
-            down = bool(user32.GetAsyncKeyState(key) & 0x8000)
-            mods_ok = all(user32.GetAsyncKeyState(vk) & 0x8000 for vk in need) if need else True
+            hits = []
+            for action, (modifiers, key) in combos:
+                need = []
+                if modifiers & 0x0002:
+                    need.append(0x11)   # Ctrl
+                if modifiers & 0x0001:
+                    need.append(0x12)   # Alt
+                if modifiers & 0x0004:
+                    need.append(0x10)   # Shift
+                if modifiers & 0x0008:
+                    need.append(0x5B)   # Win
+                down = bool(user32.GetAsyncKeyState(key) & 0x8000)
+                mods_ok = (all(user32.GetAsyncKeyState(vk) & 0x8000
+                               for vk in need) if need else True)
+                hits.append((action, down and mods_ok))
         except Exception:
             return
-        pressed = down and mods_ok
-        if pressed and not self._hotkey_state:
-            self.take_screenshot()
-        self._hotkey_state = pressed
+        for action, pressed in hits:
+            was = states.get(action, False)
+            states[action] = pressed
+            if not pressed or was:
+                continue
+            # take_screenshot() itself refuses to run unless the game owns the
+            # foreground window, but the timer is also stopped while nothing runs
+            self.take_screenshot("screen" if action == "screen" else "window")
 
-    def start_hotkey_capture(self, field):
-        from PySide6.QtWidgets import QApplication
+    def edit_hotkey(self, field=None, parent=None, apply=None):
+        """Open the capture dialog; keyboard input never leaks to Settings.
 
-        class _Grabber(QObject):
-            def __init__(self, window, target):
-                super().__init__(window)
-                self.window, self.target = window, target
+        `apply` is the setter for the field that was edited - without it every
+        dialog wrote the *window* hotkey, so binding the screen hotkey also
+        replaced the window one and both combos fired a window capture.
+        """
+        field = field or getattr(self, "shot_hotkey", None)
+        apply = apply or self.set_hotkey
+        if parent is None:
+            # MainWindow calls this on itself (self.window is the inherited
+            # QWidget.window() method there, which is not a QWidget at all)
+            parent = self if isinstance(self, QMainWindow) else getattr(self, "window", None)
+            if not isinstance(parent, QWidget):
+                parent = None
+        dialog = HotkeyDialog(parent, field.text() if field else "")
+        debug_log("hotkey dialog: opening (parent=%r)" % (parent,))
+        if isinstance(parent, QWidget):
+            # centre it on the window that asked, so it cannot open off-screen
+            screen = parent.screen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                size = dialog.sizeHint()
+                x = parent.frameGeometry().center().x() - size.width() // 2
+                y = parent.frameGeometry().center().y() - size.height() // 2
+                x = max(area.left(), min(x, area.right() - size.width()))
+                y = max(area.top(), min(y, area.bottom() - size.height()))
+                dialog.move(x, y)
+        dialog.raise_()
+        shown = dialog.exec()
+        debug_log("hotkey dialog: closed (%s)" % bool(shown))
+        if shown and field is not None:
+            field.setText(dialog.spec)
+            field.setPlaceholderText(tr("Not set"))
+            apply(dialog.spec)
 
-            def eventFilter(self, obj, event):
-                if event.type() != QEvent.KeyPress:
-                    return False
-                if event.key() == Qt.Key_Escape:
-                    self.target.setText("")
-                    self.target.setPlaceholderText(tr("Not set"))
-                    self.window.set_hotkey("")
-                    QApplication.instance().removeEventFilter(self)
-                    return True
-                parsed = from_qt(event.key(), event.modifiers())
-                if not parsed:
-                    # keep listening: a bare modifier must not end the capture
-                    return True
-                text = describe(parsed[0], parsed[1])
-                self.target.setText(text)
-                self.window.set_hotkey(text)
-                QApplication.instance().removeEventFilter(self)
-                return True
-
-        grabber = _Grabber(self, field)
-        QApplication.instance().installEventFilter(grabber)
-        self._hotkey_grabber = grabber
 
 
 class SettingsPage(ScreenshotSettingsMixin, Page):
@@ -3973,6 +4401,351 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         QMessageBox.information(self, tr("Settings"), tr("Saved."))
 
 
+class HotkeyDialog(QDialog):
+    """Capture one key combination, with live feedback for every key pressed."""
+
+    MODIFIERS = {}
+
+    def __init__(self, parent, current=""):
+        super().__init__(parent)
+        HotkeyDialog.MODIFIERS = {Qt.Key_Control: "Ctrl", Qt.Key_Alt: "Alt",
+                                  Qt.Key_Shift: "Shift", Qt.Key_Meta: "Win"}
+        self.spec = (current or "").strip()
+        # Start empty on purpose: the old combination is not a useful starting
+        # point when the point of opening this is to change it.
+        self._candidate = ""
+        self._held = []
+        self.setWindowTitle(tr("Screenshot hotkey"))
+        self.setMinimumWidth(440)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setSpacing(10)
+
+        self.value = QLabel("")
+        self.value.setObjectName("h2")
+        self.value.setAlignment(Qt.AlignCenter)
+        self.value.setMinimumHeight(54)
+        layout.addWidget(self.value)
+
+        self.pills = QHBoxLayout()
+        self.pills.setSpacing(6)
+        layout.addLayout(self.pills)
+
+        hint = QLabel(tr("Press the combination, then Save. Escape removes the "
+                         "hotkey, Cancel keeps the old one."))
+        hint.setObjectName("help")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.warn = QLabel("")
+        self.warn.setObjectName("help")
+        self.warn.setWordWrap(True)
+        layout.addWidget(self.warn)
+        layout.addStretch(1)
+
+        buttons = QHBoxLayout()
+        clear = QPushButton(tr("Clear"))
+        clear.clicked.connect(self._clear)
+        cancel = QPushButton(tr("Cancel"))
+        cancel.clicked.connect(self.reject)
+        self.save_button = QPushButton(tr("Save"))
+        self.save_button.setObjectName("primary")
+        self.save_button.clicked.connect(self._accept)
+        buttons.addWidget(clear)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.save_button)
+        layout.addLayout(buttons)
+        self._refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.activateWindow()
+        self.setFocus(Qt.OtherFocusReason)
+
+    def _refresh(self):
+        self.value.setText(self._candidate or tr("Not set"))
+        self.save_button.setEnabled(bool(self._candidate))
+        while self.pills.count():
+            item = self.pills.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        labels = list(self._held)
+        if self._candidate:
+            labels.append(self._candidate)
+        for text in labels:
+            pill = QLabel(text)
+            pill.setObjectName("pill")
+            self.pills.addWidget(pill)
+        self.pills.addStretch(1)
+        self.warn.setText("")
+        if self._candidate and "+" not in self._candidate:
+            self.warn.setText(
+                tr("Without Ctrl, Alt or Shift this key also fires while you type "
+                   "in the game: every press takes a screenshot."))
+
+    def _clear(self):
+        self._candidate = ""
+        self._held = []
+        self._refresh()
+
+    def _accept(self):
+        if not self._candidate:
+            return
+        self.spec = self._candidate
+        self.accept()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Escape:
+            # Escape means "no hotkey": the old combination is dropped.
+            self.spec = ""
+            self._candidate = ""
+            self.accept()
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self._accept()
+            return
+        if key == Qt.Key_Backspace:
+            return
+        name = self.MODIFIERS.get(key)
+        if name:
+            if name not in self._held:
+                self._held.append(name)
+                self._refresh()
+            return
+        parsed = from_qt(key, event.modifiers())
+        if parsed is None:
+            return
+        self._candidate = describe(parsed[0], parsed[1])
+        self._held = []
+        self._refresh()
+
+    def keyReleaseEvent(self, event):
+        name = self.MODIFIERS.get(event.key())
+        if name and name in self._held:
+            self._held.remove(name)
+            self._refresh()
+        super().keyReleaseEvent(event)
+
+
+def parse_route_time(text):
+    """Read a typed duration exactly like the library's Total time field.
+
+    '727' is 727 seconds (12m 07s), '12:07' is 12m 07s, '1:02:05' is 1h 02m 05s
+    and units work too ('1h 30m', '90m', '45s'). Returns None for empty text so
+    callers can tell "nothing typed" from "zero".
+    """
+    from .core import parse_time_input
+    if not (text or "").strip():
+        return None
+    return float(parse_time_input(text))
+
+
+class RouteRow(QFrame):
+    """One route: its name, its typed time, and a red bin."""
+
+    def __init__(self, editor, name="", seconds=0.0):
+        super().__init__()
+        from .core import format_time
+        self.editor = editor
+        self.original = name
+        self.setObjectName("routerow")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.name_field = QLineEdit(name)
+        self.name_field.setPlaceholderText(tr("Route name"))
+        self.name_field.setMinimumHeight(28)
+        self.time_field = QLineEdit(format_time(seconds) if seconds else "")
+        self.time_field.setPlaceholderText(tr("Time, e.g. 1h 30m"))
+        self.time_field.setFixedWidth(160)
+        self.time_field.setMinimumHeight(28)
+        self.bin_button = QToolButton()
+        self.bin_button.setObjectName("bin")
+        self.bin_button.setIcon(QIcon(trash_pixmap()))
+        self.bin_button.setIconSize(QSize(16, 16))
+        self.bin_button.setToolTip(tr("Remove this route"))
+        self.bin_button.setCursor(Qt.PointingHandCursor)
+        self.bin_button.setFixedSize(32, 28)
+        row.addWidget(self.name_field, 1)
+        row.addWidget(self.time_field)
+        row.addWidget(self.bin_button)
+        self.name_field.editingFinished.connect(lambda: editor.commit_row(self))
+        self.time_field.editingFinished.connect(lambda: editor.commit_row(self))
+        self.bin_button.clicked.connect(lambda: editor.remove_row(self))
+
+
+class RoutesEditor(QWidget):
+    """Routes of one game: a + button, then one editable row per route.
+
+    Nothing is shown until + is pressed. Times are typed by hand and saved on
+    focus-out; the app never guesses where a chapter ends and nothing here
+    touches the session clock, statistics or Discord.
+    """
+
+    def __init__(self, parent, engine, game, on_change=None):
+        super().__init__(parent)
+        self.engine = engine
+        self.game = game
+        self.on_change = on_change
+        self.rows = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 8)
+        layout.setSpacing(8)
+
+        self.rows_box = QVBoxLayout()
+        self.rows_box.setContentsMargins(0, 0, 0, 0)
+        self.rows_box.setSpacing(6)
+        self.rows_box.setAlignment(Qt.AlignTop)
+        layout.addLayout(self.rows_box)
+
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+        self.add_button = QToolButton()
+        self.add_button.setObjectName("add")
+        self.add_button.setText("+")
+        self.add_button.setToolTip(tr("Add a route"))
+        self.add_button.setCursor(Qt.PointingHandCursor)
+        self.add_button.setFixedSize(32, 28)
+        self.add_button.clicked.connect(self.add_row)
+        foot.addWidget(self.add_button, 0, Qt.AlignLeft)
+        self.hint = QLabel(tr("Add the routes you have finished and the time you spent in each."))
+        self.hint.setObjectName("help")
+        self.hint.setWordWrap(True)
+        foot.addWidget(self.hint, 1)
+        foot.addStretch(0)
+        layout.addLayout(foot)
+        # everything stays at the top; the card grows with its rows instead of
+        # leaving the + stranded at the bottom of an empty box
+        layout.addStretch(1)
+
+        self.refresh(force=True)
+
+    # ---------------------------------------------------------------- data
+    def set_game(self, game):
+        if game is not self.game:
+            self.game = game
+            self.refresh(force=True)
+        else:
+            self.refresh()
+
+    def _editing(self):
+        focused = QApplication.focusWidget()
+        for row in self.rows:
+            if focused in (row.name_field, row.time_field):
+                return True
+        return False
+
+    def _entries(self):
+        return self.engine.routes(self.game) if self.game else []
+
+    def refresh(self, force=False):
+        from .core import format_time
+        if not force and self._editing():
+            return
+        entries = self._entries()
+        current = [row.original for row in self.rows if row.original]
+        wanted = [entry["name"] for entry in entries]
+        if current != wanted or force:
+            for row in list(self.rows):
+                if not row.original or row.original not in wanted:
+                    self.rows.remove(row)
+                    row.setParent(None)
+                    row.deleteLater()
+            for entry in entries:
+                if entry["name"] in [row.original for row in self.rows]:
+                    continue
+                self._append_row(entry["name"], entry["seconds"])
+            self._resync()
+        else:
+            by_name = {entry["name"]: entry["seconds"] for entry in entries}
+            for row in self.rows:
+                if row.original and not row.time_field.hasFocus():
+                    seconds = by_name.get(row.original, 0.0)
+                    row.time_field.setText(format_time(seconds) if seconds else "")
+        has_game = bool(self.game)
+        self.add_button.setEnabled(has_game)
+        self.hint.setVisible(not self.rows)
+
+    def _resync(self):
+        """Keep widget order the same as the route order."""
+        for row in self.rows:
+            self.rows_box.removeWidget(row)
+        for row in self.rows:
+            self.rows_box.addWidget(row)
+        self.rows_box.activate()
+
+    def _append_row(self, name="", seconds=0.0):
+        row = RouteRow(self, name, seconds)
+        self.rows.append(row)
+        self.rows_box.addWidget(row)
+        return row
+
+    # ------------------------------------------------------------- actions
+    def add_row(self):
+        if not self.game:
+            return
+        if any(not row.original for row in self.rows):
+            self.rows[-1].name_field.setFocus()
+            return
+        row = self._append_row()
+        self.hint.setVisible(False)
+        row.name_field.setFocus()
+
+    def commit_row(self, row):
+        if not self.game:
+            return
+        name = (row.name_field.text() or "").strip()
+        raw_time = (row.time_field.text() or "").strip()
+        seconds = parse_route_time(raw_time) if raw_time else 0.0
+        if not name:
+            return
+        if seconds is None:
+            row.time_field.setStyleSheet("border:1px solid #ef4444;")
+            self.hint.setText(tr("That time cannot be read. Try 1h 30m, 1:30 or 90."))
+            self.hint.setVisible(True)
+            return
+        row.time_field.setStyleSheet("")
+        if row.original:
+            if name != row.original and name in self.engine.route_names(self.game):
+                self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
+                self.hint.setVisible(True)
+                return
+            if (name, seconds) != (row.original,
+                                   self.engine.route_seconds(self.game, row.original)):
+                self.engine.rename_route(self.game, row.original, name, seconds)
+                row.original = name
+        else:
+            if not self.engine.add_route(self.game, name, seconds):
+                self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
+                self.hint.setVisible(True)
+                return
+            row.original = name
+        from .core import format_time
+        row.time_field.setText(format_time(seconds) if seconds else "")
+        self._changed()
+
+    def remove_row(self, row):
+        name = row.original
+        if name:
+            question = tr("Remove the route \u201c%s\u201d and its time?") % name
+            if QMessageBox.question(self, tr("Remove route"), question) != QMessageBox.Yes:
+                return
+            self.engine.remove_route(self.game, name)
+        self.rows.remove(row)
+        row.setParent(None)
+        row.deleteLater()
+        self._changed()
+
+    def _changed(self):
+        self.refresh(force=True)
+        if self.on_change is not None:
+            self.on_change()
+
+
 class GameEditorDialog(QDialog):
     """One editor for everything, in five tabs (replaces the five side buttons)."""
 
@@ -4058,6 +4831,9 @@ class GameEditorDialog(QDialog):
         proc_form.addStretch(1)
         tabs.addTab(proc_page, "Process names")
 
+        # 6) routes
+        tabs.addTab(self._build_routes_page(), tr("Routes"))
+
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
@@ -4068,6 +4844,20 @@ class GameEditorDialog(QDialog):
         buttons.addWidget(cancel)
         buttons.addWidget(save)
         outer.addLayout(buttons)
+
+    # ------------------------------------------------------------- routes
+    def _build_routes_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        hint = QLabel(tr("Route times are typed by hand. They are kept with the "
+                         "game and never change the session clock or statistics."))
+        hint.setObjectName("sub")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.routes_editor = RoutesEditor(page, self.window.engine, self.game)
+        layout.addWidget(self.routes_editor, 1)
+        return page
+
 
     @staticmethod
     def _describe(game):
@@ -4822,8 +5612,16 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
         self.setWindowTitle("Hygger Presence")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        self.resize(1100, 760)
-        self.setMinimumSize(900, 620)
+        # Fixed starting size, in logical pixels: narrower and a bit taller than
+        # a full-bleed 16:9 window, so the cards do not stretch into one long line.
+        width, height = 1200, 880
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            width = min(width, area.width() - 40)
+            height = min(height, area.height() - 40)
+        self.resize(width, height)
+        self.setMinimumSize(1000, 700)
 
         shell = QWidget()
         self.setCentralWidget(shell)
@@ -4926,18 +5724,15 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self._snap = None
         shot_opts = (self.config.get("screenshot") or {})
         self.shot_store = shots.ScreenshotStore(shot_opts.get("path") or None)
-        self.hotkeys = HotkeyManager(self)
-        self.hotkeys.triggered.connect(self._on_hotkey)
         self.shot_signals = ShotSignals(self)
         self.shot_signals.finished.connect(self._on_shot_saved)
-        self._hotkey_state = False
+        self._hotkey_state = {}
+        # 40 ms so a tap is never missed, and only while a game is tracked: the
+        # combo is not registered with Windows, so it never steals a key from
+        # another program and it keeps working after the combo is changed
         self._hotkey_timer = QTimer(self)
-        self._hotkey_timer.setInterval(50)
+        self._hotkey_timer.setInterval(40)
         self._hotkey_timer.timeout.connect(self._poll_hotkey)
-        self._hotkey_retry = QTimer(self)
-        self._hotkey_retry.setInterval(5000)
-        self._hotkey_retry.timeout.connect(self._register_hotkey)
-        self._hotkey_retry.start()
         self.native_snap = winframe.apply_native_frame(self)
         if self.native_snap:
             self._frame_filter = winframe.NativeFrameFilter(lambda: self)
@@ -5442,6 +6237,8 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             paint_moon(hole=self.palette["bg"]) if moon
             else paint_sun())
         self.now_page.update_from_engine()
+        if hasattr(self, "library_page"):
+            self.library_page.update_icons()
 
     def request_cover(self, url, callback):
         if not url:
@@ -5565,6 +6362,8 @@ class MainWindow(ScreenshotMixin, QMainWindow):
     def tick(self):
         self.engine.tick()
         self.now_page.update_from_engine()
+        # start/stop the hotkey poll with the game (a few instructions per tick)
+        self._sync_hotkey_poll()
         if not self.engine.preview:
             if self.engine.last_error:
                 self.status_label.setText(tr("Detection error:"))

@@ -1,5 +1,83 @@
 # Changelog
 
+## 2.2.1 - 2026-10-23
+
+### Added
+- **Routes.** A game can keep a list of routes (chapters, character routes,
+  endings) with the time spent in each. The times are **typed by hand**: the
+  Detection page has its own **Routes** card that works like a small list editor —
+  press **+**, type the name and the time, press the red bin to drop a route — and
+  Library → Edit → **Routes** shows the same list. A route is just a name plus
+  hours/minutes/seconds. Nothing is guessed from the game, no route time is taken
+  from the session clock, nothing is sent to Discord and statistics are
+  unaffected.
+- **Open in folder** in the Library toolbar and in a game's right-click menu,
+  which selects the game's executable in Explorer. In the toolbar it sits between
+  **Change cover…** and the empty space before **Clear presence**.
+- **Refresh** button on the Screenshots page, left of **Open folder**, so a folder
+  that changed while the window was in the tray can be re-read on demand. It is a
+  small drawn circular arrow next to the search field, in the text colour of the
+  current theme.
+- **Full screen capture.** Settings → Screenshots has a second hotkey,
+  **Capture the whole screen**, unbound by default. Use it for games that another
+  program upscales (Magpie and friends): those draw outside the game's own window,
+  so a window grab would come out wrong. Both hotkeys are polled, so neither is
+  registered with Windows and neither steals a key from another program.
+
+### Fixed
+- Binding the screen hotkey also replaced the window hotkey (both dialogs wrote
+  the same config key), so pressing the new key kept taking a **window** shot.
+  Each **Set…** now writes its own field, and binding a combo that is already
+  used by the other capture clears that one instead of leaving two meanings on
+  one key.
+- The **PER DAY** / **PER MONTH** caption of the Statistics chart and the
+  **ROUTES** caption of the Detection card stayed English in the Chinese UI: they
+  were built without the translation helper (and the chart caption was re-set on
+  every redraw). Both now follow the selected language, like the other captions.
+
+### Changed
+- Every page that can overflow — Detection, Statistics, Settings, Screenshots —
+  scrolls, so no card or button is cut off on a small screen or a
+  maximised-at-720p laptop.
+- The window now always opens at a fixed **1200×880** (shrunk only when the
+  display is smaller than that) instead of a percentage of the screen. The minimum
+  size is 1000×700.
+- **Statistics** scrolls as one page — the header, the range picker, the totals,
+  the per-day chart and the cover cards move together instead of only the cards
+  scrolling. The cover cards **wrap into as many rows as they need** instead of
+  running off sideways behind a horizontal scrollbar.
+- **Library** follows the play time live, like the other pages: the row of the
+  game in progress counts up once a second, and the list is only rebuilt when a
+  visible number actually changed.
+- **Refresh list** moved out of the toolbar into a small flat icon (a drawn
+  circular arrow, in the text colour of the current theme) on the right of the
+  search field, freeing a button in a row that was getting crowded.
+- Route rows are drawn like the rest of the app: a **+** and a red bin drawn from
+  the palette (the native grey buttons stood out in both themes), and the row
+  itself is transparent so the card shows through with no darker band between the
+  fields.
+- The Detection card has breathing room under its buttons instead of sitting
+  flush on the card border.
+- The screenshot hotkey is no longer registered with Windows. It is polled only
+  while a tracked game is running, so it no longer swallows that key in every
+  other program and it takes effect the moment it is changed. The field in
+  Settings → Screenshots is read-only; **Set…** opens a small dialog that always
+  starts empty and shows the combination as you press it. **Escape sets no
+  hotkey** (the old combination is dropped), Cancel keeps the old one, and the
+  dialog warns when the combination has no Ctrl, Alt or Shift.
+- Library toolbar order: Add game… comes before Edit…. Edit… is disabled when no
+  row is selected.
+
+### Fixed
+- **Set… for the screenshot hotkey did nothing** in the previous build: the
+  dialog was created without a usable parent window, so clicking the button never
+  opened anything. The dialog now centres on the window that asked for it and the
+  open/close is written to the debug log.
+- The Screenshots page could keep showing an outdated gallery after a capture
+  taken while the page was hidden: the deferred refresh cleared its dirty flag
+  without rebuilding the page, so the new game folder only appeared after
+  switching pages or restarting.
+
 ## 2.2.0 - 2026-10-22
 
 ### Changed

@@ -120,6 +120,7 @@ class Engine(DetectorMixin):
         self._card_shown = False       # True while a card is on the profile
         self._last_sent = 0.0
         self._exit_watch = {}
+        # routes: each game owns {"routes": [{"name", "seconds"}], "route": name}
 
     # ---------------------------------------------------------------- detection
     def scan(self, force=False):
@@ -783,6 +784,94 @@ class Engine(DetectorMixin):
                            end - length, end, length, min_seconds=0)
         except Exception as error:
             debug_log("stats write failed: %s" % error)
+
+    # ------------------------------------------------------------- routes
+    # A route is a named bucket of playtime inside one game, and the time in it
+    # is typed by hand: the app never guesses where a chapter ends. Nothing here
+    # touches the session clock, the Discord card or stats.db.
+    def _routes(self, game):
+        """The game's route list, created on first use."""
+        routes = game.get("routes")
+        if not isinstance(routes, list):
+            routes = []
+            game["routes"] = routes
+        return routes
+
+    def _route_entry(self, game, name, create=False):
+        for entry in self._routes(game):
+            if (entry.get("name") or "") == name:
+                return entry
+        if not create:
+            return None
+        entry = {"name": name, "seconds": 0.0}
+        self._routes(game).append(entry)
+        return entry
+
+    def save_games_now(self):
+        """Persist games.json through the hook MainWindow installs."""
+        if not self.on_save:
+            return
+        try:
+            self.on_save()
+        except Exception as error:
+            debug_log("games save failed: %s" % error)
+
+    def routes(self, game):
+        """The game's routes as plain dicts, for the tables in the UI."""
+        if not game:
+            return []
+        return [{"name": entry.get("name") or "",
+                 "seconds": float(entry.get("seconds") or 0.0)}
+                for entry in self._routes(game) if (entry.get("name") or "").strip()]
+
+    def route_names(self, game):
+        return [entry["name"] for entry in self.routes(game)]
+
+    def route_seconds(self, game, name):
+        if not game or not name:
+            return 0.0
+        entry = self._route_entry(game, name)
+        return float((entry or {}).get("seconds") or 0.0)
+
+    def route_total(self, game):
+        return sum(entry["seconds"] for entry in self.routes(game))
+
+    def add_route(self, game, name, seconds=0.0):
+        name = (name or "").strip()
+        if not game or not name or self._route_entry(game, name) is not None:
+            return False
+        entry = self._route_entry(game, name, create=True)
+        entry["seconds"] = max(0.0, float(seconds or 0.0))
+        self.save_games_now()
+        return True
+
+    def rename_route(self, game, old, new, seconds=None):
+        """Rename a route and set its time in one step (Edit uses both)."""
+        old, new = (old or "").strip(), (new or "").strip()
+        if not game or not old or not new:
+            return False
+        entry = self._route_entry(game, old)
+        if entry is None:
+            return False
+        if new != old and self._route_entry(game, new) is not None:
+            return False
+        entry["name"] = new
+        if seconds is not None:
+            entry["seconds"] = max(0.0, float(seconds))
+        self.save_games_now()
+        return True
+
+    def remove_route(self, game, name):
+        name = (name or "").strip()
+        if not game or not name:
+            return False
+        routes = self._routes(game)
+        for index, entry in enumerate(routes):
+            if (entry.get("name") or "") == name:
+                del routes[index]
+                self.save_games_now()
+                return True
+        return False
 
     # ----------------------------------------------------------------- tick
     def tick(self):

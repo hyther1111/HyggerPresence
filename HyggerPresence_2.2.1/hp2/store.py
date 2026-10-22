@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "presence": dict(DEFAULT_PRESENCE),
     "launchers": [],
     "close_to_tray": True,
-    "screenshot": {"path": "", "hotkey": "", "sound": "",
+    "screenshot": {"path": "", "hotkey": "", "screen_hotkey": "", "sound": "",
                    "trim_bars": True, "copy_clipboard": False,
                    },
 }

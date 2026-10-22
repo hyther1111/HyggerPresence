@@ -39,7 +39,7 @@ echo == checking dependencies ==
 %PY% -c "import PySide6, pypresence, psutil, requests, PIL" 2>nul
 if errorlevel 1 (
     echo Installing requirements...
-    %PY% -m pip install -r "HyggerPresence_2.2.0\requirements.txt"
+    %PY% -m pip install -r "HyggerPresence_2.2.1\requirements.txt"
     if errorlevel 1 goto :failed
 )
 

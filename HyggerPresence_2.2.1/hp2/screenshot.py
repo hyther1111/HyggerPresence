@@ -334,6 +334,26 @@ def capture_window():
     return None
 
 
+def capture_screen():
+    """The whole screen the cursor is on, desktop included.
+
+    Meant for games that are upscaled by another program (Magpie and friends):
+    the thing on screen is not inside the game's own window any more, so
+    cropping to the window would capture the wrong thing.
+    """
+    try:
+        from PySide6.QtGui import QCursor
+        screen = QGuiApplication.screenAt(QCursor.pos())
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return None
+    pixmap = screen.grabWindow(0)
+    return None if pixmap.isNull() else pixmap
+
+
 SHUTTER_NAMES = ("screenshot.wav", "shutter.wav")
 LONG_FORMATS = (".mp3", ".wma", ".m4a", ".flac", ".ogg", ".aac", ".aiff", ".mid")
 

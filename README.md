@@ -4,9 +4,11 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.2.0** — screenshot gallery with global hotkey, black bar
-trimming, clipboard copy, an update download that no longer freezes the window,
-and detection that only runs when something actually happens.
+Current release: **2.2.1** — a Routes list (times typed by hand) on the Detection
+page and in the library editor, screenshot hotkeys that no longer steal keys from
+other programs, a whole-screen capture for games that an upscaler owns, a
+screenshots Refresh button, “Open in folder” for a game, a window that opens at a
+fixed 1200×880, and pages that scroll instead of clipping their buttons.
 
 ## Requirements
 
@@ -27,7 +29,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.2.0
+cd HyggerPresence/HyggerPresence_2.2.1
 pip install -r requirements.txt
 python main.py
 ```
@@ -50,8 +52,11 @@ itself, so replacing the executable keeps the library and playtime.
 - Search over title, romanised title, developer and executable.
 - Titles can be shown in their original script or romanised
   (Settings → General → Library title).
-- Actions: Start (directly or through a launcher), Edit, Add game, Remove,
-  View on VNDB, Refresh list, Change cover.
+- Actions: Start (directly or through a launcher), Add game, Edit, Remove,
+  View on VNDB, Change cover, Open in folder; right click a row for Edit,
+  Open in folder and View on VNDB. The list follows the play time live (the row
+  of the game in progress counts up once a second), and the small circular arrow
+  right of the search field reloads it from `games.json`.
 - Cover images from VNDB, several candidates per visual novel.
 
 ### Detection
@@ -63,6 +68,24 @@ itself, so replacing the executable keeps the library and playtime.
   focused), Idle (no input for 60 seconds).
 - A game that restarts its own process keeps the session; closing it resets the
   session.
+
+#### Routes
+
+Some visual novels are long enough that you want to know how much time went into
+each part, chapter or ending. A game can therefore carry a list of **routes**, and
+the time in each one is typed in by hand:
+
+- The Detection page has a **Routes** card: the routes of the game that is running,
+  each with the time spent in it. Press **+** and a row appears with a name field,
+  a time field and a red bin; the time is saved when the field loses focus.
+- Times are typed as `1h 30m`, `1:30` or `90`. The bin removes the route and its
+  time (with a confirmation).
+- The same list is in Library → Edit → **Routes**, so a game can be filled in
+  before or after it is played. Both places edit the same data.
+- Route times stay with the game in `games.json`. Hygger Presence never guesses
+  where a chapter boundary is, route time is not taken from the session clock,
+  nothing about routes is sent to Discord — the card keeps showing the whole
+  session — and statistics are unaffected.
 
 ### Discord presence
 - Three independent templates (Reading / Paused / Idle), each with a title line
@@ -101,7 +124,8 @@ Settings -> Screenshots:
 | Field | Meaning |
 |---|---|
 | Screenshot folder | Where the gallery lives. Defaults to `Pictures\HyggerPresence`; move it to another drive if you like. |
-| Hotkey | Global shortcut that captures the active window. Click the field, press the combination, press Escape to clear it. Unbound by default. |
+| Hotkey | Capture shortcut for the game's window. It is not registered with Windows: it only fires while a game is on screen and Hygger Presence knows which window to copy, so the same key still works everywhere else. Press **Set…**, hit the combination in the small window, then Save. Escape removes the hotkey and Cancel keeps the old one. Unbound by default. |
+| Capture the whole screen | Second hotkey, which copies the entire screen the cursor is on instead of the game's window. Needed when another program owns the upscaling (Magpie and friends): the picture is then outside the game's window, so a window grab would come out wrong. Unbound by default; one key cannot be bound to both captures. |
 | Sound | Shutter sound played after each capture. Any WAV or MCI supported file (mp3, wma, m4a, flac, ogg); empty uses the Windows sound. |
 | Trim black bars left and right | Removes the solid black borders an upscaler adds when the game keeps its aspect ratio (Magpie, 4:3 games on a 16:9 screen). On by default. |
 | Copy the screenshot to the clipboard | Puts the capture on the clipboard so it can be pasted into Discord or an editor. Off by default. |
@@ -121,7 +145,9 @@ The **Screenshots** page lists one card per game with its cover, its title and h
 many screenshots it holds. Double click a card to open the game, double click a
 screenshot to view it full size; `Esc` goes one level up. `Ctrl+A` selects all,
 `Ctrl+C` copies, `Delete` removes (confirmation above one file), and the right
-click menu offers Copy / Open / Show in folder / Delete.
+click menu offers Copy / Open / Show in folder (single file only) / Delete. The
+circular arrow next to the search field re-reads the folder on demand, for
+captures taken while the window sat in the tray.
 
 ## Templates
 
