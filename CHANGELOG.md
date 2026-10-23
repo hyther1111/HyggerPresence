@@ -1,11 +1,117 @@
 # Changelog
 
+## 2.3.0 - 2026-10-24
+
+**In short:** the Library can show your covers instead of a list, it remembers
+where the window was, it shows when you last read a game, and the clock stops
+when you walk away. Covers are sharp now, every table can be re-ordered and
+trimmed to the columns you want, and the game menu has a *Start ▸* sub-menu with
+your launchers.
+
+### Added
+- **Cover view.** A new button next to the search field switches the Library
+  between the list and a wall of posters. Each card fills its box with the cover
+  and, on hover, writes the title, the total time, the last read date and the .exe
+  name over the bottom of the picture, the way VNDB cards look. The title follows
+  the *Title* setting (original or romanized). Click selects, double-click edits,
+  right-click opens the game menu. The clicked game stays in sync with the list
+  view and with the *Start* button.
+- **Last read column** in the Library, between *Total time* and *Executable*: the
+  date of the newest session recorded for that game, `—` when there is none. It
+  is looked up by VNDB id first, then by title, then by .exe name, because the
+  stats file and games.json do not always use the same spelling.
+- **Column tools** in the Library and in both session dialogs: drag a header to
+  move the column, right-click the header to show or hide columns, and *Show all
+  columns* to bring them back. The row menu mirrors the button row left to right
+  and carries no second *Columns* sub-menu (the header menu still does). The last
+  visible column can never be hidden. Order, widths and visibility are stored per
+  table in `ui.header_<table>` and survive a restart; a size saved by an older
+  build is accepted and the missing column simply gets its default width.
+- **Idle status.** Settings → General → *Idle after* sets how many seconds
+  without keyboard or mouse input may pass before the status becomes *Idle*
+  (10 seconds to 4 hours, 5 minutes by default). While idle the clock stops at
+  the last real input, so the time away is never added to the session, to the
+  total time or to the statistics; the counted seconds are the ones that actually
+  reach `stats.db`.
+- **Start ▸ in the game menu.** Right-clicking a row or a poster opens the game
+  menu; *Start ▸* lists every configured launcher (LE, GALFC and plain command)
+  plus *Manage launchers…*, so a game can be launched without hunting for a row
+  button first.
+- **Window memory.** Size, position and the maximised state are restored; a
+  position is only reused when enough of the saved window still lands on a
+  screen, so unplugging the second monitor cannot hide the window.
+
+### Changed
+- Covers are drawn with the screen's pixel ratio instead of being squeezed into
+  the widget's logical size, so the *Now playing* cover, the *Discord preview*
+  thumbnail and the screenshot thumbnails are no longer blurry.
+- Downloaded covers are downscaled once to 320×440 before they are cached,
+  instead of keeping a full resolution image per game in memory.
+- The Library table has four columns by default, and the last column stretches
+  with the window, so a wider window no longer leaves an empty strip on the right.
+- *Library title* is now two buttons (*Original title* / *Romanised title*) instead
+  of a drop-down — a wheel scrolled over the old combo silently changed it. The
+  remaining combo boxes and the *Idle after* field ignore the wheel until they
+  have keyboard focus, so scrolling a settings page can no longer edit anything.
+  The two buttons are wide enough for their labels at any display scaling.
+- The image pickers in *Presence → Advanced* size themselves to their longest
+  entry, so *VNDB cover*, *Custom* and *None* are never clipped, whatever the
+  display scaling.
+- The game menu follows the order of the button row above it, *Change cover…*
+  included, so *Open in folder* now comes last. Its sub-menu arrow is the small
+  chevron the rest of the app uses, and the numeric fields and menus now carry
+  the same rounded style as the rest of the UI instead of the plain Windows look.
+  Combo dropdowns highlight the entry under the mouse in the selected blue.
+- The list/grid switch was redrawn: filled rows for the list, four tiles for the
+  grid, both on the same 20 px grid as the other toolbar icons.
+- The cover wall is laid out by `FlowPanel`, which sizes itself from the scroll
+  area width, so the height no longer flips back and forth while the scrollbar
+  appears and disappears.
+
+### Performance
+- Covers are cached on disk (`covers\cache\<hash>.img`, capped at 400 files) and
+  fetched by four worker threads sharing one keep-alive `requests.Session`,
+  instead of one new thread and one new TLS handshake per cover on every start.
+- Decoded covers are dropped from the byte cache once they reach the pixmap, so
+  the raw download is no longer kept next to the image.
+- A process scan is only forced every two seconds while nothing is detected,
+  instead of on every tick.
+- The *Discord preview* panel rebuilds its labels and restyles the presence
+  button only when the state really changed. Doing that once a second was most of
+  the idle cost: measured with the app's own timer loop, idle CPU fell from 10.5 %
+  (2.2.2) / 7.8 % (this build before the change) to **3.9 %**, and playing from
+  10.0 % to 6.2 %, with the same ~100 MB resident memory.
+
+### Fixed
+- Three dead duplicate methods that had shadowed their identical or newer copies
+  since long before 2.3.0 (`TitleBar.paintEvent`, `ScreenshotPage.keyPressEvent`,
+  `MainWindow._caption_buttons`) are gone, together with an unused `_short_time`
+  helper. Nothing that is still called was removed.
+- The cover wall could come up empty after *Refresh* or after switching list →
+  cover grid → list, and only a window resize painted it again: the panel was
+  cleared to zero height and nothing recomputed it. Cards are shown as they are
+  added and the panel now refits itself after a rebuild.
+- The Discord card could stay on *Reading* with a running timer while the app was
+  already *Idle*: a status that flaps between *Reading* and *Paused* burnt all five
+  updates Discord accepts per 20 seconds, and one stalled call was seen holding
+  the socket for 58 seconds. A new status must now hold for one second before it is
+  pushed, and a Discord call that stalls longer than 8 seconds drops the connection
+  so the next push reconnects instead of leaving the card frozen.
+- The Library layout setting lives in one place (`ui.library_view`); a value left
+  by an earlier build at the top level of the config is migrated on load.
+- Table headers were the one piece of text the language switch never touched
+  (*Title*, *Total time*, *Last read*, *Executable* stayed English in the Chinese
+  UI). They are part of the translation pass now, and the strings of the new
+  features — cover wall, column menu, idle field — are translated in both Chinese
+  files.
+
 ## 2.2.2 - 2026-10-23
 
 **In short:** the play time in the Library counts up every second again instead of
 every few seconds, the Chinese UI no longer shows English column titles, the
 statistics chart keeps every game visible on long ranges, and the window is
 slightly smaller.
+
 
 ### Changed
 - The window opens at **1120×780** (minimum 940×640) instead of 1200×880, so it

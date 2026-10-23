@@ -65,3 +65,8 @@ data_backup-*/
 
 # Helper used to draft release notes, never published
 RELEASE_NOTES_TEMPLATE.md
+
+# Local dev harnesses, report screenshots and pre-change backups (never published)
+_devtools/
+_shots/
+_backups/

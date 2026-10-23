@@ -4,13 +4,10 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.2.2** — a Routes list (times typed by hand) on the Detection
-page and in the library editor, screenshot hotkeys that no longer steal keys from
-other programs, a whole-screen capture for games that an upscaler owns, a
-screenshots Refresh button, “Open in folder” for a game, a Library table that ticks
-every second without rebuilding itself, translated Library and Launcher column
-captions, a window that opens at a fixed 1120×780, and pages that scroll instead of
-clipping their buttons.
+Current release: **2.3.0** — a Library that can show covers instead of a list and
+remembers where the window was, a *Last read* column, an *Idle* status that stops the
+clock after a configurable number of seconds without input, covers drawn at the
+screen's pixel ratio, and tables whose columns can be dragged, hidden and restored.
 
 ## What it does
 
@@ -21,14 +18,19 @@ game you are playing, without you touching anything.
   title, developer, year, cover, session time and total playtime appear on your
   Discord profile. Nothing to press, nothing to remember.
 - **Reading / Paused / Idle.** The focused game shows *Reading*. Another window in
-  front of it shows *Paused*. A minute without keyboard or mouse shows *Idle*. Each
-  state has its own text, so your profile says what you are actually doing.
+  front of it shows *Paused*. A configurable stretch without keyboard or mouse shows
+  *Idle* (Settings → General → *Idle after*, 5 minutes by default); the clock stops
+  at the last real input. Each state has its own text, so your profile says what you
+  are actually doing.
 - **Keeps the playtime.** Every session is added to a per-game total that survives
   updates and renames of the exe. Idle time is left out, so the numbers match what
   you really played.
-- **Library.** Everything you own in one searchable list. Start a game from it
-  (directly or through a launcher), change its cover, look it up on VNDB, or open
-  its folder.
+- **Library.** Everything you own in one searchable list — or as a wall of covers,
+  switched with the button next to the search field. The list shows the total time
+  and the day you last read each game; a cover card shows the title, total time,
+  last read date and .exe over the picture. Start a game from it (directly, or
+  through *Start ▸* in the right-click menu), change its cover, look it up on
+  VNDB, or open its folder — all from the button row or a right-click menu.
 - **Statistics.** Pick a range — last 7 days, this month, all time, anything in
   between — and see the time per game, a chart, and every individual session.
 - **Screenshots.** One hotkey saves the game window into one folder per game; the
@@ -71,7 +73,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.2.2
+cd HyggerPresence/HyggerPresence_2.3.0
 pip install -r requirements.txt
 python main.py
 ```
@@ -257,7 +259,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.2.2/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.0/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log
