@@ -53,6 +53,7 @@ HyggerPresence_2.1.2/
 HyggerPresence_2.2.0/
 HyggerPresence_2.2.1/
 HyggerPresence_2.2.2/
+HyggerPresence_2.3.0/
 
 # Local test builds (never published)
 HyggerPresence_2.1.1_pretest/
@@ -61,7 +62,6 @@ build_test/
 
 # Local data snapshots made before risky changes
 data_backup-*/
-HyggerPresence_2.3.0/
 
 # Helper used to draft release notes, never published
 RELEASE_NOTES_TEMPLATE.md
