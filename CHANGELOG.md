@@ -2,6 +2,11 @@
 
 ## 2.2.2 - 2026-10-23
 
+**In short:** the play time in the Library counts up every second again instead of
+every few seconds, the Chinese UI no longer shows English column titles, the
+statistics chart keeps every game visible on long ranges, and the window is
+slightly smaller.
+
 ### Changed
 - The window opens at **1120×780** (minimum 940×640) instead of 1200×880, so it
   fits next to a game on a 1080p screen without covering half of it.
@@ -34,6 +39,11 @@
   once per second.
 
 ## 2.2.1 - 2026-10-23
+
+**In short:** every game can carry a list of routes whose times you type in by
+hand, the screenshot page gained a Refresh button and a second hotkey for the whole
+screen, “Open in folder” was added to the library, the Chinese UI is translated
+everywhere, and a statistics card keeps its selection after a double click.
 
 ### Added
 - **Routes.** A game can keep a list of routes (chapters, character routes,
@@ -130,6 +140,11 @@
 
 ## 2.2.0 - 2026-10-22
 
+**In short:** the app is now almost idle when nothing is running (about 5 % → about
+1 % of one core here) and a game that starts is noticed in a fraction of a second
+instead of up to three seconds. The Discord card also stopped disappearing at
+random.
+
 ### Changed
 - **Idle CPU is now a fraction of what it was.** The app used to wake up about
   eight times a second even with no game running: a 1 second detection tick, a
@@ -212,6 +227,10 @@
 
 ## 2.1.2 - 2026-10-21
 
+**In short:** the updater no longer freezes the window while it downloads — there
+is a progress bar now — and it can restart the app for you when the download is
+done.
+
 ### Added
 - **"Restart now" or "Later".** When the download finishes the app asks what to
   do. "Later" keeps the app running and installs the update on the next normal
@@ -265,6 +284,9 @@
 
 ## 2.1.1 - 2026-10-19
 
+**In short:** screenshots can drop the black bars an upscaler adds, and every
+capture can be copied to the clipboard automatically.
+
 ### Added
 - **Trim black bars.** Captures drop uniform black borders (left/right and
   top/bottom), which is what upscalers such as Magpie add when the game keeps
@@ -284,6 +306,10 @@
   instead of `QTimer.singleShot` from a worker thread, which never fired.
 
 ## 2.1.0 - 2026-10-19
+
+**In short:** a new Screenshots page saves the running game's window into one
+folder per game when you press a hotkey, and the gallery, search and session log
+work like a small file browser.
 
 ### Screenshots (new)
 - New page between Statistics and Settings. Cards behave like folders: one card
@@ -331,6 +357,11 @@
   had focus.
 
 ## 2.0.0 — 2026-10-19
+
+**In short:** the interface was rebuilt in Qt. Detection, the Discord connection and
+the playtime database are the same as 1.0.3, but everything you see is new: dark
+and light themes, a window that snaps like a real Windows app, a searchable
+library, and a statistics page with ranges, charts and a session log.
 
 The interface was rewritten in Qt (PySide6). Detection, the Discord connection
 and the playtime database were carried over from 1.0.3 and then revised.
@@ -384,6 +415,10 @@ and the playtime database were carried over from 1.0.3 and then revised.
 
 ## 1.0.3 — 2026-10-17
 
+**In short:** the update loop was made much cheaper (CPU dropped to roughly
+0–0.1 %, about a hundred times less than before) and status changes reach Discord in
+about a millisecond instead of ~60 ms.
+
 - Added library search, including romanised titles.
 - Detect processes spawned by the selected executable.
 - Rebuilt the update loop: CPU usage dropped to roughly 0–0.1 % (previously
@@ -395,13 +430,21 @@ and the playtime database were carried over from 1.0.3 and then revised.
 
 ## 1.0.2 — 2026-10-14
 
+**In short:** maintenance — internal fixes, no new features.
+
 - Internal maintenance and bug fixes.
 
 ## 1.0.1 — 2026-10-06
 
+**In short:** maintenance — internal fixes, no new features.
+
 - Internal maintenance and bug fixes.
 
 ## 1.0.0 — 2026-10-05
+
+**In short:** first release — a Discord card for whichever visual novel is running,
+with a library, automatic detection, VNDB lookups, launchers, statistics and a
+self-updater.
 
 First release.
 

@@ -1,8 +1,30 @@
-# 2.2.2
+# 2.2.2 — 2026-10-23
 
-Small follow-up to 2.2.1: faster UI in the places that ticked every second, a
-Statistics chart that keeps the per-game split on wide ranges, and the last
-untranslated captions.
+Small follow-up to 2.2.1: the playtime counter ticks every second again, the
+Statistics chart keeps the per-game split on wide ranges, and the last untranslated
+captions are translated.
+
+## What Hygger Presence is
+
+Hygger Presence keeps your Discord status in sync with the visual novel you are
+playing: it detects the running game, shows its title, developer, cover, session
+time and total playtime on your profile, and records how long you played each game.
+It comes with a searchable library, VNDB lookups, launchers for Japanese games
+(Locale Emulator, GalFC), a statistics page, a screenshot tool with one hotkey per
+game, optional hand-typed route times, three languages and a dark and a light theme.
+Everything stays on your machine — the library, the settings and the playtime live in
+`%APPDATA%\HyggerPresence`, and Discord only ever receives the card text and images.
+
+## What's new in 2.2.2
+
+- **The play time in the Library counts up every second again.** It used to step
+  every two or three seconds, and it no longer costs extra CPU to do so.
+- **The Chinese UI speaks Chinese everywhere.** The Library and Launcher column
+  titles and the two update message boxes were the last English leftovers.
+- **Long statistics ranges keep every game.** Past 60 days the chart used to merge
+  everything into one `Total` bar per month; now each month keeps the per-game split.
+- **The window is a little smaller** — 1120×780 instead of 1200×880 — so it fits
+  next to a game on a 1080p screen.
 
 ## Fixed
 

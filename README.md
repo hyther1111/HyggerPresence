@@ -12,6 +12,46 @@ every second without rebuilding itself, translated Library and Launcher column
 captions, a window that opens at a fixed 1120×780, and pages that scroll instead of
 clipping their buttons.
 
+## What it does
+
+Hygger Presence sits in the tray and keeps your Discord status in sync with the
+game you are playing, without you touching anything.
+
+- **Shows the game you are playing.** When a game from your library starts, its
+  title, developer, year, cover, session time and total playtime appear on your
+  Discord profile. Nothing to press, nothing to remember.
+- **Reading / Paused / Idle.** The focused game shows *Reading*. Another window in
+  front of it shows *Paused*. A minute without keyboard or mouse shows *Idle*. Each
+  state has its own text, so your profile says what you are actually doing.
+- **Keeps the playtime.** Every session is added to a per-game total that survives
+  updates and renames of the exe. Idle time is left out, so the numbers match what
+  you really played.
+- **Library.** Everything you own in one searchable list. Start a game from it
+  (directly or through a launcher), change its cover, look it up on VNDB, or open
+  its folder.
+- **Statistics.** Pick a range — last 7 days, this month, all time, anything in
+  between — and see the time per game, a chart, and every individual session.
+- **Screenshots.** One hotkey saves the game window into one folder per game; the
+  gallery browses, searches and opens them.
+- **Routes.** For long games, keep your own list of routes with the time you spent
+  in each one, typed in by hand.
+- **Launchers.** Japanese games often need a locale emulator (Locale Emulator,
+  GalFC) or a custom command; the app can start them that way.
+- **Three languages** — English, Traditional Chinese, Simplified Chinese — and dark
+  and light themes.
+
+Everything stays on your machine: the library, the settings and the playtime live in
+`%APPDATA%\HyggerPresence`. Nothing is uploaded anywhere; Discord only ever receives
+the card text and the cover image.
+
+## Quick start
+
+1. Run `HyggerPresence.exe` and keep the Discord desktop client open.
+2. Add a game: Library → **Add game…**, pick its executable and, if you like, paste a
+   VNDB link to fill in the developer, year, cover and romaji title.
+3. Start it from the Library (or launch it normally) — the card shows up on your
+   Discord profile within a second or two.
+
 ## Requirements
 
 - Windows 10 or 11
@@ -47,7 +87,7 @@ PyInstaller if necessary and writes `dist\HyggerPresence.exe` (single file,
 no console). Data files are never bundled; the executable creates them next to
 itself, so replacing the executable keeps the library and playtime.
 
-## Features
+## Features in detail
 
 ### Library
 - One row per game with title, total playtime and executable.
@@ -217,7 +257,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.0.0/
+HyggerPresence_2.2.2/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log
@@ -227,13 +267,23 @@ HyggerPresence_2.0.0/
     vndb.py          VNDB API
     store.py         games.json / config.json, 1.x import
     stats.py         SQLite playtime store
+    screenshot.py    window/screen capture, folders, thumbnails, trimming
+    hotkey.py        combo parsing and the polled hotkey binding
     engine.py        detection tick, Discord RPC, session clock, statistics
     ui.py            window, pages, dialogs, theming
     winframe.py      native Windows frame for the frameless window
     i18n.py          translations and live language switching
     locales/         en.json, zh_TW.json, zh_CN.json
   requirements.txt
+HyggerPresence.spec            PyInstaller one-file recipe
+build.bat                      build script (installs PyInstaller if needed)
+CHANGELOG.md                   what changed in every version
+RELEASE_NOTES_TEMPLATE.md      skeleton for a GitHub release body
 ```
+
+Every released version keeps its own folder under `Old versions/` and its own git
+tag, so the sources of, say, 2.1.0 can always be read or rebuilt:
+`git worktree add ..\hp210 v2.1.0`.
 
 ## Translating
 
