@@ -308,6 +308,7 @@
   "There is already a route called “%s”.": "There is already a route called “%s”.",
   "These can be used in the Title, Line 1 and Line 2 fields of every status.": "These can be used in the Title, Line 1 and Line 2 fields of every status.",
   "Third line, e.g. {status} • Total {total_time}": "Third line, e.g. {status} • Total {total_time}",
+  "This build runs from source, so it cannot replace itself.": "This build runs from source, so it cannot replace itself.",
   "This game has no VNDB id yet.": "This game has no VNDB id yet.",
   "This month": "This month",
   "This release has no .exe asset.": "This release has no .exe asset.",

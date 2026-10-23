@@ -308,6 +308,7 @@
   "There is already a route called “%s”.": "已經有叫「%s」的路線了。",
   "These can be used in the Title, Line 1 and Line 2 fields of every status.": "這些變數可用在每個狀態的標題、第 1 行與第 2 行。",
   "Third line, e.g. {status} • Total {total_time}": "第三行，例如 {status} • Total {total_time}",
+  "This build runs from source, so it cannot replace itself.": "這是從源碼執行的版本，無法自行取代。",
   "This game has no VNDB id yet.": "這個遊戲尚未設定 VNDB ID。",
   "This month": "本月",
   "This release has no .exe asset.": "這個版本沒有 .exe 檔。",

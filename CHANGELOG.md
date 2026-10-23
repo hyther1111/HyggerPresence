@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.2.2 - 2026-10-23
+
+### Changed
+- The window opens at **1120×780** (minimum 940×640) instead of 1200×880, so it
+  fits next to a game on a 1080p screen without covering half of it.
+
+### Fixed
+- The **Library** and **Launcher** tables stayed English in the Chinese UI: the
+  column captions (*Title*, *Total time*, *Executable*, *Launcher*) were built
+  without the translation helper. They now follow the selected language.
+- The two message boxes of **Settings → Updates** (“this release has no .exe
+  asset”, “this build runs from source”) were English only; both are translated
+  now, including their window titles.
+- **CPU while reading.** The live play time of the Library row rebuilt the whole
+  table once per second — every row got new items and the list repainted from
+  scratch — and every theme change added another one-second timer doing the same
+  work, so the cost grew with each press of the light/dark button. The timer is
+  created once now, and a tick rewrites only the one cell whose number changed
+  (0.44 ms → 0.013 ms per tick here, and no full repaint).
+- **CPU while idle.** That same timer also ran whenever the Library was on screen,
+  even with no game running, so an idle window woke the process once a second for
+  nothing. It now starts and stops with the game.
+- **Statistics chart, wide ranges.** Past 60 days the chart switched to one
+  `Total` bar per month, which threw away the per-game split. It still groups per
+  month, but each bar keeps the games stacked (same colours and legend as the daily
+  view); the `Total` pseudo-entry is gone. The switch-over point moved from 62 to
+  60 days.
+- **Live play time updated late.** The one-second refresh of the Library row was
+  restarted by the main tick every second, so its deadline never came due — the
+  number only moved when a tick happened to be late, which looked like a 2-3 s
+  update. It is now refreshed on the same clock as the engine tick, so it steps
+  once per second.
+
 ## 2.2.1 - 2026-10-23
 
 ### Added

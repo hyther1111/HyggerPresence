@@ -700,7 +700,8 @@ class LibraryPage(Page):
         outer.addLayout(head)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Title", "Total time", "Executable"])
+        self.table.setHorizontalHeaderLabels([tr("Title"), tr("Total time"),
+                                              tr("Executable")])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -755,6 +756,13 @@ class LibraryPage(Page):
         self.cover_button.clicked.connect(self.change_cover)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_menu)
+        # the play time of the row that is running changes every second; the
+        # list follows it while it is on screen. Created once here - rebuilding
+        # it in update_icons() would leak one timer per theme change.
+        self._live_game = None
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(1000)
+        self._live_timer.timeout.connect(self._live_refresh)
         self.update_icons()
         self.refresh()
 
@@ -763,38 +771,64 @@ class LibraryPage(Page):
         if hasattr(self, "refresh_button"):
             colour = self.window.palette["subtext"]
             self.refresh_button.setIcon(QIcon(reload_pixmap(20, colour)))
-        # the play time of the row that is running changes every second; like
-        # the other pages the list follows it while it is on screen
-        self._live_timer = QTimer(self)
-        self._live_timer.setInterval(1000)
-        self._live_timer.timeout.connect(self._live_refresh)
+
+    def retranslate(self):
+        """Header captions: table headers are not part of the label registry."""
+        self.table.setHorizontalHeaderLabels([tr("Title"), tr("Total time"),
+                                              tr("Executable")])
+
+    def sync_live_timer(self, busy):
+        """Only wake up once a second while a game is actually running.
+
+        The timer used to stay on whenever the Library was visible, so an idle
+        window still woke the process every second for nothing.
+        """
+        if busy and self.isVisibleTo(self.window):
+            # start() on a running timer restarts its countdown, so the main
+            # tick (which also runs once a second) used to push the deadline
+            # forward every time and the row jumped 2-3 s instead of 1 s
+            if not self._live_timer.isActive():
+                self._live_timer.start()
+        elif self._live_timer.isActive():
+            self._live_refresh()        # one last refresh, then go quiet
+            self._live_timer.stop()
 
     def showEvent(self, event):
         super().showEvent(event)
-        if hasattr(self, "_live_timer"):
-            self._live_timer.start()
+        self.sync_live_timer(self.engine.game is not None)
 
     def hideEvent(self, event):
         super().hideEvent(event)
-        if hasattr(self, "_live_timer"):
-            self._live_timer.stop()
+        self._live_timer.stop()
 
     def _live_refresh(self):
-        """Re-render only when a visible number changed."""
+        """Keep the running game's play time ticking, nothing else.
+
+        The first version compared every row and called refresh() on any
+        difference, which rebuilt the whole table (36 new items for 12 games)
+        and repainted every row once per second. Only one cell can change while
+        a game runs, so touch that cell and leave the rest alone.
+        """
         from .core import format_time
-        wanted = []
-        for game in self.window.visible_games:
-            total = game.get("total_seconds", 0)
-            if self.engine.game is game:
-                total = self.engine.total_seconds
-            wanted.append(format_time(total))
-        shown = [self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-                 for row in range(self.table.rowCount())]
-        if wanted != shown:
-            current = self.selected()
+        game = self.engine.game
+        if game is None or game is not self._live_game:
+            # a game started or stopped: totals and highlight may all differ
+            started_or_stopped = game is not None or self._live_game is not None
+            self._live_game = game
+            if started_or_stopped:
+                self.refresh()
+            return
+        if self.table.rowCount() != len(self.window.visible_games):
             self.refresh()
-            if current is not None:
-                self._select_game(current)
+            return
+        try:
+            row = self.window.visible_games.index(game)
+        except ValueError:
+            return                      # filtered out by the search box
+        item = self.table.item(row, 1)
+        text = format_time(self.engine.total_seconds)
+        if item is not None and item.text() != text:
+            item.setText(text)
 
     def _select_game(self, game):
         try:
@@ -1395,7 +1429,7 @@ MENU_QSS = ("QMenu{background:%(surface)s;color:%(text)s;border:1px solid %(bord
             "QMenu::item:selected{background:%(accent)s;color:#ffffff;}"
             "QMenu::item:disabled{background:transparent;color:%(subtext)s;}"
             "QMenu::item:disabled:selected{background:transparent;color:%(subtext)s;}")
-APP_VERSION = "2.2.1"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.2.2"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -2000,7 +2034,7 @@ class StatsPage(Page):
             self.chart.set_data([], {})
             self.legend.setText("")
             return
-        if days <= 62:
+        if days <= 60:
             from datetime import timedelta
             labels = [(start + timedelta(days=offset)).isoformat()
                       for offset in range(days)]
@@ -2028,11 +2062,38 @@ class StatsPage(Page):
                  for label in labels], colours)
             self._update_legend(colours)
         else:
-            rows = stats.by_month(start.isoformat(), end.isoformat())
+            # Wider ranges are grouped per month. The per-game split is kept -
+            # collapsing everything into one "Total" bar loses the point of the
+            # chart - so the same bucket logic is used with a month key.
+            from datetime import timedelta
+            months = []
+            cursor = start.replace(day=1)
+            while cursor <= end:
+                months.append(cursor.strftime("%Y-%m"))
+                cursor = (cursor.replace(day=28) + timedelta(days=7)).replace(day=1)
+            buckets = {label: {} for label in months}
+            for row in stats.by_day_game(start.isoformat(), end.isoformat()):
+                month, key, seconds = row[0][:7], row[1], (row[2] or 0)
+                buckets.setdefault(month, {})
+                buckets[month][key] = buckets[month].get(key, 0) + seconds
+            if live and live_game is not None:
+                month_key = start.__class__.today().strftime("%Y-%m")
+                name = live_game.get("original") or live_game.get("title") or ""
+                if month_key in buckets and name:
+                    buckets[month_key][name] = buckets[month_key].get(name, 0) + live
+            keys = []
+            for label in months:
+                for key in buckets.get(label, {}):
+                    if key not in keys:
+                        keys.append(key)
+            colours = {key: CHART_COLOURS[index % len(CHART_COLOURS)]
+                       for index, key in enumerate(keys)}
             self.chart_title.setText(tr("PER MONTH"))
-            self.chart.set_data([(row[0], [("Total", row[1] or 0)]) for row in rows],
-                                {"Total": CHART_COLOURS[2]})
-            self.legend.setText("")
+            self.chart.set_data(
+                [(label, sorted(buckets.get(label, {}).items(),
+                                key=lambda item: -item[1]))
+                 for label in months], colours)
+            self._update_legend(colours)
 
     def _update_legend(self, colours):
         parts = []
@@ -3770,6 +3831,15 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self._refresh_skip_label()
         except Exception:
             pass
+        # table headers live outside the label registry, so translate them here
+        try:
+            self.window.library_page.retranslate()
+        except Exception:
+            pass
+        try:
+            self.launcher_list.setHorizontalHeaderLabels([tr("Launcher")])
+        except Exception:
+            pass
 
     def _refresh_update_notes(self):
         key = getattr(self, "_update_notes_key", None)
@@ -4011,7 +4081,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         launch_layout = QVBoxLayout(page)
         launch_layout.setContentsMargins(14, 14, 14, 14)
         self.launcher_list = QTableWidget(0, 1)
-        self.launcher_list.setHorizontalHeaderLabels(["Launcher"])
+        self.launcher_list.setHorizontalHeaderLabels([tr("Launcher")])
         self.launcher_list.verticalHeader().setVisible(False)
         self.launcher_list.setSelectionBehavior(QTableWidget.SelectRows)
         self.launcher_list.setSelectionMode(QTableWidget.SingleSelection)
@@ -4214,12 +4284,12 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             return
         asset = updater.pick_exe(info)
         if not asset:
-            QMessageBox.warning(self, "Update", "This release has no .exe asset.")
+            QMessageBox.warning(self, tr("Update"), tr("This release has no .exe asset."))
             return
         if not updater.can_self_update():
             QMessageBox.information(
-                self, "Update",
-                "This build runs from source, so it cannot replace itself.")
+                self, tr("Update"),
+                tr("This build runs from source, so it cannot replace itself."))
             return
         if self._update_thread is not None:
             return                      # a download is already running
@@ -5691,16 +5761,16 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
         self.setWindowTitle("Hygger Presence")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        # Fixed starting size, in logical pixels: narrower and a bit taller than
-        # a full-bleed 16:9 window, so the cards do not stretch into one long line.
-        width, height = 1200, 880
+        # Fixed starting size, in logical pixels. Small enough to sit next to the
+        # game on a 1080p screen, big enough for four cover cards in a row.
+        width, height = 1120, 780
         screen = QApplication.primaryScreen()
         if screen is not None:
             area = screen.availableGeometry()
             width = min(width, area.width() - 40)
             height = min(height, area.height() - 40)
         self.resize(width, height)
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(940, 640)
 
         shell = QWidget()
         self.setCentralWidget(shell)
@@ -6456,6 +6526,11 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         else:
             self.status_label.setText(self.engine.status or "")
         self._adapt_timers()
+        # the Library row only needs a one-second timer while a game runs
+        self.library_page.sync_live_timer(self.engine.game is not None)
+        # refresh on this clock too: it is the same 1 s the engine ticked on,
+        # so the row cannot fall behind the number it is showing
+        self.library_page._live_refresh()
 
     def add_game_dialog(self):
         from PySide6.QtWidgets import QFileDialog, QInputDialog
