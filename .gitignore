@@ -61,3 +61,7 @@ build_test/
 
 # Local data snapshots made before risky changes
 data_backup-*/
+HyggerPresence_2.3.0/
+
+# Helper used to draft release notes, never published
+RELEASE_NOTES_TEMPLATE.md
