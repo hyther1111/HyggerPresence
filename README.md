@@ -88,8 +88,20 @@ build.bat
 
 The script picks a Python 3 installation that has the dependencies, installs
 PyInstaller if necessary and writes `dist\HyggerPresence.exe` (single file,
-no console). Data files are never bundled; the executable creates them next to
-itself, so replacing the executable keeps the library and playtime.
+no console). Data files are never bundled; they live in
+`%APPDATA%\HyggerPresence`, so replacing the executable keeps the library and
+playtime.
+
+PyInstaller bundles whatever the chosen Python has installed, so a Python with
+the full `PySide6` package (QML, Quick, PDF, virtual keyboard) or extras such as
+`cryptography` makes the exe about 14 MB bigger for nothing. Building from a
+clean virtual environment with only `requirements.txt` avoids that:
+
+```bat
+python -m venv buildenv
+buildenv\Scripts\pip install -r HyggerPresence_2.3.1\requirements.txt pyinstaller
+buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
+```
 
 ## Features in detail
 
@@ -270,7 +282,7 @@ HyggerPresence_2.3.1/          current sources (older versions: Old versions/)
     vndb.py          VNDB API
     store.py         games.json / config.json, 1.x import
     stats.py         SQLite playtime store
-    screenshot.py    window/screen capture, folders, thumbnails, trimming
+    screenshot.py    game / Magpie capture, folders, thumbnails, trimming
     hotkey.py        combo parsing and the polled hotkey binding
     engine.py        detection tick, Discord RPC, session clock, statistics
     ui.py            window, pages, dialogs, theming
