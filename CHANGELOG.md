@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.3.1 - 2026-10-27
+
+**In short:** screenshots of a game upscaled by Magpie come out whole. There is
+one capture hotkey again, and it works the same with or without Magpie.
+
+### Changed
+- **One screenshot hotkey.** *Capture the game* grabs Magpie's upscaled picture
+  while Magpie scales the game (fullscreen and windowed scaling) and the game's
+  window otherwise. Magpie leaves the game window at its own size and draws the
+  scaled image in a window of its own, so the old window grab only caught a piece
+  of it. Magpie's scaling window is owned by the game window, which is how the
+  two are matched; in windowed mode the `Magpie_Renderer` child is used so the
+  border is left out. Lossless Scaling is matched by its process name.
+- *Capture the whole screen* is gone from Settings → Screenshots. A config that
+  only had that hotkey keeps its key as the main hotkey.
+- The grab copies real screen pixels with `BitBlt` at Win32 coordinates instead
+  of cropping a Qt grab of the primary screen, so captures are right on a second
+  monitor and at 150 % / 200 % display scaling. The Qt crop stays as a fallback.
+
+### Fixed
+- A screenshot folder that cannot be created on this PC (for example a
+  `config.json` copied from another computer, pointing at another user's
+  `C:\Users\…`) falls back to `Pictures\HyggerPresence`; before, every capture
+  was dropped without a word. Failed saves are now written to the debug log.
+
 ## 2.3.0 - 2026-10-24
 
 **In short:** the Library can show your covers instead of a list, it remembers

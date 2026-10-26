@@ -4,10 +4,12 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.0** — a Library that can show covers instead of a list and
-remembers where the window was, a *Last read* column, an *Idle* status that stops the
-clock after a configurable number of seconds without input, covers drawn at the
-screen's pixel ratio, and tables whose columns can be dragged, hidden and restored.
+Current release: **2.3.1** — the screenshot hotkey captures the whole game even
+while Magpie upscales it, so there is one capture hotkey instead of two. It builds
+on 2.3.0: a Library that can show covers instead of a list and remembers where the
+window was, a *Last read* column, an *Idle* status that stops the clock after a
+configurable number of seconds without input, covers drawn at the screen's pixel
+ratio, and tables whose columns can be dragged, hidden and restored.
 
 ## What it does
 
@@ -33,7 +35,7 @@ game you are playing, without you touching anything.
   VNDB, or open its folder — all from the button row or a right-click menu.
 - **Statistics.** Pick a range — last 7 days, this month, all time, anything in
   between — and see the time per game, a chart, and every individual session.
-- **Screenshots.** One hotkey saves the game window into one folder per game; the
+- **Screenshots.** One hotkey saves the game (or Magpie's upscaled picture of it) into one folder per game; the
   gallery browses, searches and opens them.
 - **Routes.** For long games, keep your own list of routes with the time you spent
   in each one, typed in by hand.
@@ -73,7 +75,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.0
+cd HyggerPresence/HyggerPresence_2.3.1
 pip install -r requirements.txt
 python main.py
 ```
@@ -173,9 +175,8 @@ Settings -> Screenshots:
 
 | Field | Meaning |
 |---|---|
-| Screenshot folder | Where the gallery lives. Defaults to `Pictures\HyggerPresence`; move it to another drive if you like. |
-| Hotkey | Capture shortcut for the game's window. It is not registered with Windows: it only fires while a game is on screen and Hygger Presence knows which window to copy, so the same key still works everywhere else. Press **Set…**, hit the combination in the small window, then Save. Escape removes the hotkey and Cancel keeps the old one. Unbound by default. |
-| Capture the whole screen | Second hotkey, which copies the entire screen the cursor is on instead of the game's window. Needed when another program owns the upscaling (Magpie and friends): the picture is then outside the game's window, so a window grab would come out wrong. Unbound by default; one key cannot be bound to both captures. |
+| Screenshot folder | Where the gallery lives. Defaults to `Pictures\HyggerPresence`; move it to another drive if you like. A folder that cannot be created on this PC (a config copied from another computer) falls back to the default. |
+| Capture the game | Capture shortcut for the game. While Magpie upscales the game, the upscaled picture is captured (fullscreen or windowed scaling); otherwise the game's window. The grab works on any monitor and at any Windows display scaling. The hotkey is not registered with Windows: it only fires while a game is on screen and Hygger Presence knows which window to copy, so the same key still works everywhere else. Press **Set…**, hit the combination in the small window, then Save. Escape removes the hotkey and Cancel keeps the old one. Unbound by default. |
 | Sound | Shutter sound played after each capture. Any WAV or MCI supported file (mp3, wma, m4a, flac, ogg); empty uses the Windows sound. |
 | Trim black bars left and right | Removes the solid black borders an upscaler adds when the game keeps its aspect ratio (Magpie, 4:3 games on a 16:9 screen). On by default. |
 | Copy the screenshot to the clipboard | Puts the capture on the clipboard so it can be pasted into Discord or an editor. Off by default. |
@@ -259,7 +260,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.0/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.1/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log
