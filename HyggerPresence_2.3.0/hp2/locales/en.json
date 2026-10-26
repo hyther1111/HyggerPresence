@@ -379,5 +379,7 @@
   "{title} – game title (original script)": "{title} – game title (original script)",
   "{total_time} – all playtime, formatted": "{total_time} – all playtime, formatted",
   "{vndb} – VNDB id (used in the button URL)": "{vndb} – VNDB id (used in the button URL)",
-  "{year} – release year": "{year} – release year"
+  "{year} – release year": "{year} – release year",
+  "Capture the game": "Capture the game",
+  "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.": "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game."
 }

@@ -402,5 +402,7 @@
   "{title} – game title (original script)": "{title} – 游戏名称（原文）",
   "{total_time} – all playtime, formatted": "{total_time} – 总游玩时间（已格式化）",
   "{vndb} – VNDB id (used in the button URL)": "{vndb} – VNDB 编号（用于按钮链接）",
-  "{year} – release year": "{year} – 发售年份"
+  "{year} – release year": "{year} – 发售年份",
+  "Capture the game": "截取游戏画面",
+  "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.": "游戏被 Magpie 放大时，会截取放大后的画面而不是游戏自身的窗口，所以截图总是完整的游戏画面。"
 }
