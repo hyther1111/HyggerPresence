@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     "idle_seconds": 300,
     "window": {},                   # w/h/x/y/max remembered on quit
     "ui": {},                       # column widths, header states
-    "screenshot": {"path": "", "hotkey": "", "screen_hotkey": "", "sound": "",
+    "screenshot": {"path": "", "hotkey": "", "sound": "",
                    "trim_bars": True, "copy_clipboard": False,
                    },
 }
@@ -140,6 +140,12 @@ def load_config():
                 merged.pop(stale, None)
             merged["screenshot"] = {**DEFAULT_CONFIG["screenshot"],
                                     **(merged.get("screenshot") or {})}
+            # the whole-screen hotkey is gone: the one hotkey follows Magpie by
+            # itself now, so it takes over that combo when it had none
+            shot = merged["screenshot"]
+            if not (shot.get("hotkey") or "").strip():
+                shot["hotkey"] = shot.get("screen_hotkey") or ""
+            shot.pop("screen_hotkey", None)
             return merged
         except Exception:
             pass

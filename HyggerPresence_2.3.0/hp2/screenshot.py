@@ -154,6 +154,13 @@ class ScreenshotStore:
 
     def __init__(self, base_dir=None):
         self.base_dir = Path(base_dir) if base_dir else default_base_dir()
+        if base_dir:
+            try:
+                self.base_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                # a config copied from another PC points at that PC's user
+                # folder, where every save would fail without a word
+                self.base_dir = default_base_dir()
 
     @property
     def root(self):
@@ -311,47 +318,197 @@ def foreground_hwnd():
         return 0
 
 
-def capture_window():
-    """Contents of the foreground window, title bar excluded.
+# Magpie's scaling window. It is owned by the window it scales, in fullscreen
+# and windowed mode alike, and the game keeps the keyboard focus meanwhile.
+MAGPIE_CLASS = "Window_Magpie_967EB565-6F73-4E94-AE53-00CC42592A22"
+# windowed mode draws into this child; the parent adds a border around it
+MAGPIE_RENDERER_CLASS = "Magpie_Renderer"
 
-    Grabbing one window is much cheaper than grabbing the whole screen, but on
-    some setups the frame comes along, so the title bar height is trimmed.
+
+def _class_name(hwnd):
+    buffer = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, buffer, 256)
+    return buffer.value
+
+
+def _is_shown(hwnd):
+    """Visible, not minimised and not cloaked (another virtual desktop)."""
+    user32 = ctypes.windll.user32
+    if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+        return False
+    cloaked = ctypes.c_int(0)
+    try:
+        ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))  # DWMWA_CLOAKED
+    except Exception:
+        pass
+    return not cloaked.value
+
+
+def _client_rect(hwnd):
+    rect = _RECT()
+    user32 = ctypes.windll.user32
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+        return None
+    origin = _POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+        return None
+    if rect.right <= 0 or rect.bottom <= 0:
+        return None
+    return QRect(origin.x, origin.y, rect.right, rect.bottom)
+
+
+def upscaled_rect(game_hwnd, game_rect):
+    """Where an upscaler draws the game on screen, or None when nothing does.
+
+    Magpie and friends leave the game window at its own size (1280x720, say)
+    and paint the scaled picture in a topmost window of their own, so the
+    pixels inside the game's client area are only a piece of the upscaled
+    image. Windows above the game are walked top to bottom.
     """
-    screen = QGuiApplication.primaryScreen()
-    if screen is None:
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:
         return None
-    # Grab the composited screen and crop the client area: a window grab
-    # (grabWindow(hwnd)) comes back black for anything a game draws on the GPU.
-    full = screen.grabWindow(0)
-    rect = foreground_client_rect()
-    if full.isNull() or rect is None:
-        return None
-    bounds = QRect(0, 0, full.width(), full.height())
-    for factor in pixmap_crop_hints(full, screen):
-        candidate = scale_rect(rect, factor, bounds)
-        if candidate.width() >= 4 and candidate.height() >= 4:
-            return full.copy(candidate)
+    centre = game_rect.center()
+    hwnd = user32.GetTopWindow(0)
+    for _ in range(1000):
+        if not hwnd or hwnd == game_hwnd:
+            break
+        if _is_shown(hwnd):
+            if _class_name(hwnd) == MAGPIE_CLASS:
+                if user32.GetWindow(hwnd, 4) == game_hwnd:   # GW_OWNER
+                    renderer = user32.FindWindowExW(hwnd, 0, MAGPIE_RENDERER_CLASS, None)
+                    if renderer and _is_shown(renderer):
+                        return _client_rect(renderer)
+                    return _client_rect(hwnd)
+            else:
+                # other upscalers: a window of theirs that covers the game
+                rect = _client_rect(hwnd)
+                if (rect is not None and rect.contains(centre)
+                        and rect.width() * rect.height()
+                        > game_rect.width() * game_rect.height()):
+                    pid = ctypes.c_ulong(0)
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    name = _process_name(pid.value).replace(" ", "")
+                    if any(tool.replace(" ", "") in name for tool in UPSCALERS):
+                        return rect
+        hwnd = user32.GetWindow(hwnd, 2)   # GW_HWNDNEXT
     return None
 
 
-def capture_screen():
-    """The whole screen the cursor is on, desktop included.
+def _grab_rect(rect):
+    """Copy a rectangle of the composited desktop, in physical pixels.
 
-    Meant for games that are upscaled by another program (Magpie and friends):
-    the thing on screen is not inside the game's own window any more, so
-    cropping to the window would capture the wrong thing.
+    Win32 coordinates go straight to BitBlt, so the grab is right on any
+    monitor and at any DPI scale. CAPTUREBLT includes layered windows, which
+    is what Magpie draws with.
     """
+    from PySide6.QtGui import QImage
     try:
-        from PySide6.QtGui import QCursor
-        screen = QGuiApplication.screenAt(QCursor.pos())
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
     except Exception:
-        screen = None
-    if screen is None:
-        screen = QGuiApplication.primaryScreen()
+        return None
+    left = user32.GetSystemMetrics(76)     # SM_XVIRTUALSCREEN
+    top = user32.GetSystemMetrics(77)
+    desktop = QRect(left, top, user32.GetSystemMetrics(78), user32.GetSystemMetrics(79))
+    rect = rect.intersected(desktop)
+    width, height = rect.width(), rect.height()
+    if width < 4 or height < 4:
+        return None
+
+    handle = ctypes.c_void_p
+    user32.GetDC.restype = handle
+    user32.ReleaseDC.argtypes = (handle, handle)
+    gdi32.CreateCompatibleDC.restype = handle
+    gdi32.CreateCompatibleDC.argtypes = (handle,)
+    gdi32.CreateCompatibleBitmap.restype = handle
+    gdi32.CreateCompatibleBitmap.argtypes = (handle, ctypes.c_int, ctypes.c_int)
+    gdi32.SelectObject.restype = handle
+    gdi32.SelectObject.argtypes = (handle, handle)
+    gdi32.BitBlt.argtypes = (handle, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, handle, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_uint)
+    gdi32.GetDIBits.argtypes = (handle, handle, ctypes.c_uint, ctypes.c_uint,
+                                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint)
+    gdi32.DeleteObject.argtypes = (handle,)
+    gdi32.DeleteDC.argtypes = (handle,)
+
+    class _BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                    ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                    ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                    ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                    ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+                    ("biClrImportant", ctypes.c_uint32)]
+
+    screen_dc = user32.GetDC(None)
+    if not screen_dc:
+        return None
+    memory_dc = gdi32.CreateCompatibleDC(screen_dc)
+    bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+    previous = gdi32.SelectObject(memory_dc, bitmap)
+    try:
+        if not gdi32.BitBlt(memory_dc, 0, 0, width, height, screen_dc,
+                            rect.x(), rect.y(), 0x00CC0020 | 0x40000000):  # SRCCOPY | CAPTUREBLT
+            return None
+        header = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), width,
+                                   -height, 1, 32, 0, 0, 0, 0, 0, 0)  # top-down BI_RGB
+        buffer = ctypes.create_string_buffer(width * height * 4)
+        if gdi32.GetDIBits(memory_dc, bitmap, 0, height, buffer,
+                           ctypes.byref(header), 0) != height:
+            return None
+    finally:
+        gdi32.SelectObject(memory_dc, previous)
+        gdi32.DeleteObject(bitmap)
+        gdi32.DeleteDC(memory_dc)
+        user32.ReleaseDC(None, screen_dc)
+    image = QImage(buffer.raw, width, height, width * 4, QImage.Format_RGB32).copy()
+    pixmap = QPixmap.fromImage(image)
+    return None if pixmap.isNull() else pixmap
+
+
+def capture_window():
+    """What the player sees of the foreground game, title bar excluded.
+
+    That is the game's client area, or the upscaled picture when Magpie (or a
+    similar tool) is scaling the game, so one hotkey works either way.
+    """
+    hwnd = foreground_hwnd()
+    rect = foreground_client_rect()
+    if not hwnd or rect is None:
+        return None
+    # Grab the composited screen: a window grab (grabWindow(hwnd)) comes back
+    # black for anything a game draws on the GPU.
+    target = upscaled_rect(hwnd, rect) or rect
+    try:
+        from .core import debug_log
+        debug_log("capture rect %d,%d %dx%d (%s)"
+                  % (target.x(), target.y(), target.width(), target.height(),
+                     "upscaled" if target is not rect else "game window"))
+    except Exception:
+        pass
+    try:
+        pixmap = _grab_rect(target)
+    except Exception:
+        pixmap = None
+    if pixmap is not None:
+        return pixmap
+
+    # fallback: the old Qt grab of the primary screen
+    screen = QGuiApplication.primaryScreen()
     if screen is None:
         return None
-    pixmap = screen.grabWindow(0)
-    return None if pixmap.isNull() else pixmap
+    full = screen.grabWindow(0)
+    if full.isNull():
+        return None
+    bounds = QRect(0, 0, full.width(), full.height())
+    for factor in pixmap_crop_hints(full, screen):
+        candidate = scale_rect(target, factor, bounds)
+        if candidate.width() >= 4 and candidate.height() >= 4:
+            return full.copy(candidate)
+    return None
 
 
 SHUTTER_NAMES = ("screenshot.wav", "shutter.wav")

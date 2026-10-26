@@ -3024,7 +3024,7 @@ class ScreenshotSettingsMixin:
 
         layout.addWidget(QLabel(tr("Hotkey")))
         line = QHBoxLayout()
-        line.addWidget(QLabel(tr("Capture the active window")))
+        line.addWidget(QLabel(tr("Capture the game")))
         line.addStretch(1)
         self.shot_hotkey = QLineEdit(opts.get("hotkey") or "")
         self.shot_hotkey.setReadOnly(True)
@@ -3042,27 +3042,9 @@ class ScreenshotSettingsMixin:
         self._help(layout, tr("Set opens a small window: press the combination "
                               "there and it is shown as you type it. The hotkey "
                               "only fires while a game is on screen."))
-
-        line = QHBoxLayout()
-        line.addWidget(QLabel(tr("Capture the whole screen")))
-        line.addStretch(1)
-        self.screen_hotkey = QLineEdit(opts.get("screen_hotkey") or "")
-        self.screen_hotkey.setReadOnly(True)
-        self.screen_hotkey.setPlaceholderText(tr("Not set"))
-        line.addWidget(self.screen_hotkey, 1)
-        screen_setter = QPushButton(tr("Set…"))
-        screen_setter.clicked.connect(
-            lambda: self.window.edit_hotkey(self.screen_hotkey,
-                                            apply=self.window.set_screen_hotkey))
-        line.addWidget(screen_setter)
-        screen_clear = QPushButton(tr("Clear"))
-        screen_clear.clicked.connect(self._clear_screen_hotkey)
-        line.addWidget(screen_clear)
-        layout.addLayout(line)
-        self._help(layout, tr("Copies the whole screen instead of the game's "
-                              "window. Use it when the game is upscaled by another "
-                              "program, like Magpie, which draws outside the game's "
-                              "own window. Unbound by default."))
+        self._help(layout, tr("When Magpie upscales the game, the upscaled picture "
+                              "is captured instead of the game's own window, so "
+                              "the screenshot always shows the full game."))
 
         layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Sound")))
@@ -3126,11 +3108,6 @@ class ScreenshotSettingsMixin:
         self.shot_hotkey.setText("")
         self.shot_hotkey.setPlaceholderText(tr("Not set"))
         self.window.set_hotkey("")
-
-    def _clear_screen_hotkey(self):
-        self.screen_hotkey.setText("")
-        self.screen_hotkey.setPlaceholderText(tr("Not set"))
-        self.window.set_screen_hotkey("")
 
     def _pick_shot_folder(self):
         from PySide6.QtWidgets import QFileDialog
@@ -3940,8 +3917,8 @@ class ScreenshotMixin:
         except Exception:
             return False
 
-    def take_screenshot(self, mode="window"):
-        """mode 'window' grabs the game's window, 'screen' the whole screen."""
+    def take_screenshot(self):
+        """Grab the game, or its upscaled picture while Magpie scales it."""
         if not hasattr(self, "shot_store"):
             return
         import time as _t
@@ -3960,13 +3937,13 @@ class ScreenshotMixin:
         opts = (self.config.get("screenshot") or {})
         import time as _t
         _started = _t.time()
-        pixmap = shots.capture_screen() if mode == "screen" else shots.capture_window()
+        pixmap = shots.capture_window()
         if pixmap is None:
             self._capturing = False
         else:
             try:
-                debug_log("capture %s %dx%d in %.0f ms"
-                          % (mode, pixmap.width(), pixmap.height(),
+                debug_log("capture %dx%d in %.0f ms"
+                          % (pixmap.width(), pixmap.height(),
                              (_t.time() - _started) * 1000.0))
             except Exception:
                 pass
@@ -3976,9 +3953,8 @@ class ScreenshotMixin:
 
     def _deliver_capture(self, pixmap, opts):
         try:
-            debug_log("capture %dx%d mode=%s -> folder %r"
+            debug_log("capture %dx%d -> folder %r"
                       % (pixmap.width(), pixmap.height(),
-                         opts.get("mode") or "window",
                          self.current_game_title() or shots.FOLDER_FALLBACK))
         except Exception:
             pass
@@ -3994,7 +3970,9 @@ class ScreenshotMixin:
         def save_in_background():
             try:
                 store_.save(pixmap, title)
-            except Exception:
+            except Exception as exc:
+                debug_log("capture not saved: %s" % exc)
+                self._capturing = False
                 return
             self._capturing = False
             self.shot_signals.finished.emit(pixmap if copy_after else None)
@@ -4056,38 +4034,7 @@ class ScreenshotMixin:
         opts = self.config.setdefault("screenshot", {})
         opts["hotkey"] = spec
         store.update_config_section("screenshot", {"hotkey": spec})
-        self._drop_duplicate_combo("hotkey", "screen_hotkey", "screen_hotkey",
-                                   getattr(self, "screen_hotkey", None), spec)
         self._sync_hotkey_poll()
-
-    def set_screen_hotkey(self, spec):
-        opts = self.config.setdefault("screenshot", {})
-        opts["screen_hotkey"] = spec
-        store.update_config_section("screenshot", {"screen_hotkey": spec})
-        self._drop_duplicate_combo("screen_hotkey", "hotkey", "hotkey",
-                                   getattr(self, "shot_hotkey", None), spec)
-        self._sync_hotkey_poll()
-
-    def _drop_duplicate_combo(self, own_field, other_field, other_config_key,
-                              other_widget, spec):
-        """One key cannot mean two things: binding it here clears it over there.
-
-        A build that saved both fields from the same dialog left both combos
-        identical, which made every press take a window shot only.
-        """
-        spec = (spec or "").strip().lower()
-        if not spec:
-            return
-        opts = self.config.setdefault("screenshot", {})
-        if (opts.get(other_field) or "").strip().lower() != spec:
-            return
-        opts[other_field] = ""
-        store.update_config_section("screenshot", {other_config_key: ""})
-        if other_widget is not None:
-            other_widget.setText("")
-            other_widget.setPlaceholderText(tr("Not set"))
-        debug_log("hotkey %r was bound to %s and %s; kept %s"
-                  % (spec, own_field, other_field, own_field))
 
     def _hotkey_parsed(self):
         return self._parsed_hotkeys()[0] if self._parsed_hotkeys() else None
@@ -4097,7 +4044,7 @@ class ScreenshotMixin:
         opts = (self.config.get("screenshot") or {})
         out = []
         seen = set()
-        for action, field in (("window", "hotkey"), ("screen", "screen_hotkey")):
+        for action, field in (("window", "hotkey"),):
             spec = (opts.get(field) or "").strip()
             if not spec:
                 continue
@@ -4162,7 +4109,7 @@ class ScreenshotMixin:
                 continue
             # take_screenshot() itself refuses to run unless the game owns the
             # foreground window, but the timer is also stopped while nothing runs
-            self.take_screenshot("screen" if action == "screen" else "window")
+            self.take_screenshot()
 
     def edit_hotkey(self, field=None, parent=None, apply=None):
         """Open the capture dialog; keyboard input never leaks to Settings.
