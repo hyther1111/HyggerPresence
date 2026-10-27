@@ -111,12 +111,30 @@ def _write_json(path, payload):
     tmp.replace(path)
 
 
+def _fill_defaults(base, data):
+    """Recursively add missing keys from ``base`` into ``data`` (in place)."""
+    for key, value in base.items():
+        if key not in data:
+            data[key] = copy.deepcopy(value)
+        elif isinstance(value, dict) and isinstance(data.get(key), dict):
+            _fill_defaults(value, data[key])
+    return data
+
+
 def load_config():
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             merged = copy.deepcopy(DEFAULT_CONFIG)
             merged.update(data)
+            # a file written by 2.3.2 pre-release can miss nested template keys;
+            # fill them from the defaults so no line comes back empty
+            _fill_defaults(DEFAULT_CONFIG.get("templates") or {},
+                           merged.setdefault("templates", {}))
+            for status, template in (merged.get("templates") or {}).items():
+                if not isinstance(template, dict):
+                    merged["templates"][status] = copy.deepcopy(
+                        (DEFAULT_CONFIG.get("templates") or {}).get(status) or {})
             # 1.x config: presence options lived in "presence_opts"
             if "presence_opts" in data and "presence" not in data:
                 opts = dict(DEFAULT_PRESENCE)
@@ -153,26 +171,19 @@ def load_config():
 
 
 def _drop_defaults(values, defaults):
-    """Remove values that equal the built-in default, recursively.
+    """Remove top-level values that equal the built-in default.
 
-    load_config() merges the file over DEFAULT_CONFIG, so a key that is absent
-    means "the default". Writing the merged result and then dropping anything
-    that matches a default keeps config.json small *and* lets a setting go back
-    to its default value: the old value is gone from the file instead of
-    surviving the merge. (2.3.1 stripped defaults before merging, which made
-    every "reset to default" silently keep the previous value.)
+    load_config() merges the file over DEFAULT_CONFIG, so an absent key means
+    "the default". Dropping default-equal keys (instead of stripping them before
+    the merge) keeps config.json small *and* still lets a setting go back to its
+    default value. Nested dicts are written whole: load_config() only merges the
+    top level, so a half-written "templates" would lose its lines.
     """
     if not isinstance(values, dict):
         return values
     result = {}
     for key, value in values.items():
-        default = defaults.get(key) if isinstance(defaults, dict) else None
-        if isinstance(value, dict) and isinstance(default, dict):
-            nested = _drop_defaults(value, default)
-            if nested:
-                result[key] = nested
-            continue
-        if isinstance(defaults, dict) and key in defaults and value == default:
+        if isinstance(defaults, dict) and key in defaults and value == defaults[key]:
             continue
         result[key] = value
     return result

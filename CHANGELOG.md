@@ -36,6 +36,9 @@ environment, so it is about 32 MB instead of 54 MB.
   the custom large image or putting `large_text` back to `{title}` therefore did
   nothing, while any other text saved fine. The merge now happens first and keys
   that are at their default are dropped afterwards, so "back to default" sticks.
+  Only top-level keys are dropped: nested sections such as `templates` are
+  written whole, and `load_config()` fills any missing nested key from the
+  defaults, so a config written by the broken build does not come back empty.
 - **The light theme never survived a restart.** The window always started in the
   dark palette and the theme button never wrote its choice back to
   `config.json`, so the file stayed on `"theme": "dark"`. The choice is read at
