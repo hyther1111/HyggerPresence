@@ -30,6 +30,12 @@ environment, so it is about 32 MB instead of 54 MB.
   same substitution.
 - **No small image in the Detection preview.** The preview drew only the large
   image, so a configured small image could not be checked before saving.
+- **A setting could not be reset to its default.** `save_config()` removed every
+  value that matched a default *before* merging the rest into `config.json`, so
+  the previous value stayed in the file and came back on the next load. Emptying
+  the custom large image or putting `large_text` back to `{title}` therefore did
+  nothing, while any other text saved fine. The merge now happens first and keys
+  that are at their default are dropped afterwards, so "back to default" sticks.
 - **The light theme never survived a restart.** The window always started in the
   dark palette and the theme button never wrote its choice back to
   `config.json`, so the file stayed on `"theme": "dark"`. The choice is read at

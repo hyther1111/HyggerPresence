@@ -152,13 +152,15 @@ def load_config():
     return copy.deepcopy(DEFAULT_CONFIG)
 
 
-def _strip_defaults(values, defaults):
-    """Drop values that still equal the built-in default.
+def _drop_defaults(values, defaults):
+    """Remove values that equal the built-in default, recursively.
 
-    The settings page hands us the whole in-memory config, which was built from
-    DEFAULT_CONFIG plus the file. Writing that back would replace keys the page
-    never touched (client_id, launchers, ...) with their defaults, so anything
-    still at its default is left out of the write and the file value survives.
+    load_config() merges the file over DEFAULT_CONFIG, so a key that is absent
+    means "the default". Writing the merged result and then dropping anything
+    that matches a default keeps config.json small *and* lets a setting go back
+    to its default value: the old value is gone from the file instead of
+    surviving the merge. (2.3.1 stripped defaults before merging, which made
+    every "reset to default" silently keep the previous value.)
     """
     if not isinstance(values, dict):
         return values
@@ -166,15 +168,13 @@ def _strip_defaults(values, defaults):
     for key, value in values.items():
         default = defaults.get(key) if isinstance(defaults, dict) else None
         if isinstance(value, dict) and isinstance(default, dict):
-            nested = _strip_defaults(value, default)
+            nested = _drop_defaults(value, default)
             if nested:
                 result[key] = nested
-        elif value == default and default is not None:
             continue
-        elif isinstance(value, list) and isinstance(default, list) and value == default:
+        if isinstance(defaults, dict) and key in defaults and value == default:
             continue
-        else:
-            result[key] = value
+        result[key] = value
     return result
 
 
@@ -194,7 +194,11 @@ def update_config_section(section, values):
 def save_config(config):
     existing = _read_json(CONFIG_FILE)
     if isinstance(existing, dict) and isinstance(config, dict):
-        config = _deep_merge(existing, _strip_defaults(config, DEFAULT_CONFIG))
+        # merge, then drop everything that is back at its default so the stored
+        # value cannot survive a later load (that is how a reset was lost before)
+        config = _deep_merge(existing, config)
+    if isinstance(config, dict):
+        config = _drop_defaults(config, DEFAULT_CONFIG)
     _write_json(CONFIG_FILE, config)
 
 
