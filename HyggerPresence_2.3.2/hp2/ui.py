@@ -787,6 +787,31 @@ def scaled_for(image, width, height, widget=None, mode=None):
     return scaled
 
 
+def rounded_pixmap(pixmap, radius):
+    """Clip a pixmap to a rounded rectangle (the Discord card has round corners)."""
+    if pixmap is None:
+        return pixmap
+    if not isinstance(pixmap, QPixmap):
+        pixmap = QPixmap.fromImage(pixmap)
+    if pixmap.isNull():
+        return pixmap
+    radius = max(0.0, float(radius))
+    if radius <= 0:
+        return pixmap
+    ratio = pixmap.devicePixelRatio() or 1.0
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(pixmap.rect()), radius * ratio, radius * ratio)
+    result = QPixmap(pixmap.size())
+    result.setDevicePixelRatio(ratio)
+    result.fill(Qt.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, pixmap)
+    painter.end()
+    return result
+
+
 COVER_WORKERS = 4                   # parallel cover downloads
 COVER_CACHE_FILES = 400             # keep the cover cache from growing for ever
 
@@ -2005,8 +2030,9 @@ class NowPage(Page):
         if image is None or getattr(self, "_small_image", None) != url:
             return
         self.prev_small.setText("")
-        self.prev_small.setPixmap(scaled_for(image, 26, 26, self.prev_small,
-                                             Qt.KeepAspectRatioByExpanding))
+        self.prev_small.setPixmap(rounded_pixmap(
+            scaled_for(image, 26, 26, self.prev_small,
+                       Qt.KeepAspectRatioByExpanding), 13))
 
     def _show_engine_error(self):
         error = (self.engine.last_error or "").strip()
@@ -2063,8 +2089,9 @@ class NowPage(Page):
         if image is None:
             return
         self.cover.setPixmap(scaled_for(image, 150, 210, self.cover))
-        self.prev_cover.setPixmap(scaled_for(image, 84, 84, self.prev_cover,
-                                             Qt.KeepAspectRatioByExpanding))
+        self.prev_cover.setPixmap(rounded_pixmap(
+            scaled_for(image, 84, 84, self.prev_cover,
+                       Qt.KeepAspectRatioByExpanding), 8))
 
 
 EDGE = 16
@@ -5212,6 +5239,12 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             "total_time_format": self.total_fmt.text().strip() or store.TIMEFORMAT,
         }
         store.save_config(config)
+        debug_log("settings saved: large=%r (%s) small=%r (%s) theme=%r"
+                  % (config["presence"].get("custom_large_image"),
+                     config["presence"].get("large_image_mode"),
+                     config["presence"].get("custom_small_image"),
+                     config["presence"].get("small_image_mode"),
+                     config.get("theme")))
         engine = window.engine
         engine.client_id = config["client_id"]
         engine.templates = config["templates"]
@@ -6479,7 +6512,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.app = app
         self.engine = app.engine
         self.config = app.config
-        self.palette = DARK
+        # 2.3.2: the light theme used to be session-only; the choice is kept now
+        stored_theme = str((self.config or {}).get("theme") or "").strip().lower()
+        self.palette = LIGHT if stored_theme == "light" else DARK
         self.visible_games = []
         self._cover_callbacks = {}
 
@@ -7149,6 +7184,13 @@ class MainWindow(ScreenshotMixin, QMainWindow):
     def toggle_theme(self):
         self.palette = LIGHT if self.palette is DARK else DARK
         self.apply_theme()
+        # remember the choice: this is why light mode never survived a restart
+        try:
+            self.config["theme"] = "light" if self.palette is LIGHT else "dark"
+            store.save_config(self.config)
+            debug_log("theme switched to %s" % self.config["theme"])
+        except Exception:
+            pass
 
     def apply_theme(self):
         self.palette_bg = self.palette["bg"]
@@ -7480,6 +7522,14 @@ class Application:
         return fetch_vndb(vndb_id)
 
     def shutdown(self):
+        # 2.3.2: an older copy of the app still running in the tray used to write
+        # its stale config back on exit, which silently undid a Save made in the
+        # newer window. Remember when we started and only write if nobody else
+        # touched config.json in the meantime.
+        try:
+            stamp = store.CONFIG_FILE.stat().st_mtime_ns
+        except OSError:
+            stamp = None
         for page in (getattr(self.window, "library_page", None),
                      getattr(self.window, "settings_page", None)):
             try:
@@ -7496,7 +7546,20 @@ class Application:
         try:
             # the window owns the live config; self.config may be a stale dict
             live = getattr(getattr(self, "window", None), "config", None) or self.config
-            store.save_config(live)
+            try:
+                now = store.CONFIG_FILE.stat().st_mtime_ns
+            except OSError:
+                now = None
+            if stamp is not None and now is not None and now != stamp:
+                debug_log("config.json changed while running; not overwriting it")
+            else:
+                store.save_config(live)
+                try:
+                    stored = (live.get("presence") or {}).get("custom_large_image")
+                    debug_log("config.json written on exit: large=%r theme=%r"
+                              % (stored, live.get("theme")))
+                except Exception:
+                    pass
         except Exception:
             pass
         try:

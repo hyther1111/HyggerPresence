@@ -30,11 +30,22 @@ environment, so it is about 32 MB instead of 54 MB.
   same substitution.
 - **No small image in the Detection preview.** The preview drew only the large
   image, so a configured small image could not be checked before saving.
+- **The light theme never survived a restart.** The window always started in the
+  dark palette and the theme button never wrote its choice back to
+  `config.json`, so the file stayed on `"theme": "dark"`. The choice is read at
+  startup and saved when it changes.
+- **An older copy of the app could overwrite newer settings.** When a second
+  instance (for example an old version still sitting in the tray) closed, it
+  wrote its own stale `config.json`, undoing a Save made in the other window.
+  Exit now writes the config only when the file was not touched while the app
+  was running.
 
 ### Added
 - The Detection preview now draws the small image in the corner, and resting the
   pointer on the big or the small image shows the hover text that Discord would
   show (`small_text`, or the image reference when it is empty).
+- Both preview pictures have slightly rounded corners, like the card Discord
+  draws.
 - Settings → Presence says that variables work in the hover texts too.
 
 ### Changed
