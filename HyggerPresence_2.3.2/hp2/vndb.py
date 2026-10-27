@@ -80,6 +80,11 @@ def fetch_vndb(vndb_id):
         else:
             rating_average = average if average is not None else bayes
             rating_weighted = bayes if average is not None else None
+        # VNDB only publishes the Bayesian number once a title has enough votes;
+        # until then "rating" is null while "average" already exists, so fall
+        # back to the raw average instead of showing N/A.
+        if rating_weighted is None:
+            rating_weighted = rating_average
 
         def _fmt_rating(v):
             if v is None or v == "N/A":

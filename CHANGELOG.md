@@ -15,6 +15,10 @@ environment, so it is about 32 MB instead of 54 MB.
   `{rating_weighted}` at N/A. `average` now feeds `{rating_average}` and
   `rating` feeds `{rating_weighted}`, both back on the 0–10 scale. Values already
   stored in `games.json` are kept as they are, so no library is rewritten.
+- **`{rating_weighted}` said N/A for newer titles.** VNDB only publishes the
+  Bayesian number once a title has enough votes; below that `rating` is null
+  while `average` already exists. Both the fetch and the card now fall back to
+  the average, so a single-vote title shows 9.70 instead of N/A.
 - **A cover could stay blank until Refresh.** When the last cards of a large
   library were built while their pictures were still being decoded, their
   callback could be dropped and the card painted "VN" for the rest of the

@@ -1123,6 +1123,12 @@ class Engine(DetectorMixin):
     def _var_map(self, game, status):
         """Every {token} a template or a hover text may use."""
         opts = self.opts or {}
+        # VNDB leaves the Bayesian number empty until a title has enough votes;
+        # show the raw average instead of "N/A" for the weighted slot then.
+        average_text = _rating_text(game.get("rating_average"))
+        weighted_text = _rating_text(game.get("rating_weighted"))
+        if weighted_text == "N/A" and average_text != "N/A":
+            weighted_text = average_text
         return {
             "title": game.get("original") or game.get("title") or "",
             "romanized_title": game.get("romanized") or game.get("title") or "",
@@ -1133,8 +1139,8 @@ class Engine(DetectorMixin):
                                         opts.get("session_time_format") or SMART_TIME_FORMAT),
             "total_time": format_time(self.total_seconds,
                                       opts.get("total_time_format") or SMART_TIME_FORMAT),
-            "rating_average": _rating_text(game.get("rating_average")),
-            "rating_weighted": _rating_text(game.get("rating_weighted")),
+            "rating_average": average_text,
+            "rating_weighted": weighted_text,
             "vndb": game.get("vndb_id") or "",
         }
 
