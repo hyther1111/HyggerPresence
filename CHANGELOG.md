@@ -8,11 +8,21 @@ preview draws the small image with its hover text. The exe is built from a clean
 environment, so it is about 32 MB instead of 54 MB.
 
 ### Fixed
-- **VNDB rating shown ten times too big.** The new VNDB API returns `rating` and
-  `rating_weighted` on a 0–100 scale (7.61 on vndb.org arrives as 76.1), while
-  the old API used 0–10. Both are normalised to 0–10, so `{rating_average}` and
-  `{rating_weighted}` read the same as on the site. Values already stored in
-  `games.json` are kept as they are, so no library is rewritten.
+- **VNDB rating shown ten times too big.** VNDB's API has always answered on a
+  0–100 scale (`rating` is the Bayesian one, `average` the raw one): 7.61 on the
+  site arrives as 76.1. 1.x divided both by ten; 2.x kept only `rating` and
+  dropped the division, so the first re-fetch showed 76.10 and left
+  `{rating_weighted}` at N/A. `average` now feeds `{rating_average}` and
+  `rating` feeds `{rating_weighted}`, both back on the 0–10 scale. Values already
+  stored in `games.json` are kept as they are, so no library is rewritten.
+- **A cover could stay blank until Refresh.** When the last cards of a large
+  library were built while their pictures were still being decoded, their
+  callback could be dropped and the card painted "VN" for the rest of the
+  session. One late sweep now retries any card that is still empty, and a cover
+  that failed to decode is retried once instead of being remembered as broken.
+- **Custom small images from imgur answered 429.** The HTTP client sent the
+  stock `python-requests` user agent, which imgur rate-limits; it now sends
+  `HyggerPresence/2.3.2`, so the same URL loads.
 - **Variables stayed literal in some texts.** `{title}`, `{session_time}`,
   `{rating_average}` and the rest worked in the first and second line, but the
   large image text, the small image text and the button label showed the braces

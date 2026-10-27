@@ -36,7 +36,7 @@ def fetch_vndb(vndb_id):
             "filters": ["id", "=", vndb_id],
             "fields": (
                 "title,alttitle,titles.title,titles.lang,image.url,"
-                "released,developers.name,rating"
+                "released,developers.name,average,rating,votecount"
             ),
         }
         r = requests.post(
@@ -65,17 +65,21 @@ def fetch_vndb(vndb_id):
         released = vn.get("released") or ""
         year = released[:4] if len(released) >= 4 else "????"
 
-        rating = vn.get("rating")
-        # The v2 API hands out a plain number on VNDB's 0-100 scale (87.5 is
-        # the 8.75 the site shows). Older payloads nested a dict; both shapes
-        # are accepted and both end up on the 0-10 scale the templates use.
-        if isinstance(rating, dict):
-            rating_average = rating.get("average") or rating.get("rating")
-            rating_weighted = rating.get("bayesian") or rating.get("weighted")
+        # The v2 API always answered on VNDB's 0-100 scale (8.75 shows as 87.5)
+        # and there are two numbers: "average" is the raw vote average, "rating"
+        # is the Bayesian one. 1.x mapped them to {rating_average} and
+        # {rating_weighted}; 2.x read only "rating" and forgot the /10, which is
+        # why the same game showed 76.10 after a re-fetch. Both shapes (a plain
+        # number or the older nested dict) are accepted.
+        average = vn.get("average")
+        bayes = vn.get("rating")
+        if isinstance(average, dict) or isinstance(bayes, dict):
+            blob = average if isinstance(average, dict) else bayes
+            rating_average = blob.get("average") or blob.get("rating")
+            rating_weighted = blob.get("bayesian") or blob.get("weighted")
         else:
-            rating_average = rating
-            # v2 has no Bayesian rating of its own, so leave the stored one be
-            rating_weighted = None
+            rating_average = average if average is not None else bayes
+            rating_weighted = bayes if average is not None else None
 
         def _fmt_rating(v):
             if v is None or v == "N/A":

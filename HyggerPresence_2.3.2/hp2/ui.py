@@ -7180,9 +7180,14 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         if not url:
             return
         if url in self.app.cover_cache:
-            # known pixels, or known to be broken: either way, do not ask again
-            callback(url, self.app.cover_cache[url])
-            return
+            cached = self.app.cover_cache[url]
+            # "None" means an earlier decode failed. Retry once per session
+            # instead of painting that card blank until the app is restarted.
+            if cached is not None or url in self.app.cover_retried:
+                callback(url, cached)
+                return
+            self.app.cover_retried.add(url)
+            self.app.cover_cache.pop(url, None)
         on_disk = cover_bytes_from_disk(url)
         if on_disk is not None:
             self.app.cover_bytes[url] = on_disk
@@ -7241,6 +7246,24 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         # nothing left to decode: stop waking up three times a second
         if not self._cover_callbacks and not self.app.cover_bytes:
             self.cover_timer.stop()
+            # A card that was built while its picture was still on the way can
+            # end up without one (seen on the last cards of a large library).
+            # One late sweep makes that self-heal instead of waiting for the
+            # user to press Refresh.
+            QTimer.singleShot(1500, self.sweep_missing_covers)
+
+    def sweep_missing_covers(self):
+        page = getattr(self, "library_page", None)
+        if page is None:
+            return
+        for card in list(getattr(page, "_cards", []) or []):
+            if getattr(card, "_cover", None) is not None:
+                continue
+            url = (getattr(card, "game", None) or {}).get("image") or ""
+            if not url:
+                continue
+            self.app.cover_cache.pop(url, None)
+            self.request_cover(url, card._got_cover)
 
     def refresh_clock_display(self):
         """Recount session/total once a second without running detection."""
@@ -7387,6 +7410,7 @@ class Application:
         self.cover_cache = {}
         self.cover_bytes = {}
         self.cover_pending = set()
+        self.cover_retried = set()
         self.cover_queue = queue.Queue()
         self.cover_workers = 0
         self.session = None
@@ -7405,10 +7429,18 @@ class Application:
         # shutdown() so "Later" really means "when you close the app"
         self.pending_update = None
 
+    USER_AGENT = ("HyggerPresence/2.3.2 "
+                  "(+https://github.com/hyther1111/HyggerPresence)")
+
     def fetch(self, url):
         import requests
         if self.session is None:
             self.session = requests.Session()
+            # imgur answers the default "python-requests" agent with 429, which
+            # is why a perfectly good small image never showed up. A real UA
+            # (and no keep-alive surprises) makes the same URL work.
+            self.session.headers.update({"User-Agent": self.USER_AGENT,
+                                         "Accept": "image/*,*/*;q=0.8"})
         response = self.session.get(url, timeout=(4, 15))
         response.raise_for_status()
         return response.content
