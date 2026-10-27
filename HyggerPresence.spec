@@ -12,7 +12,7 @@ import os
 
 # HP_APP_DIR lets a test build point at another copy of the sources without
 # editing this file, e.g. set HP_APP_DIR=HyggerPresence_2.1.1_pretest
-APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.3.1")
+APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.3.2")
 ICON = str(APP_DIR / "icon.ico")
 
 datas = [
@@ -53,6 +53,41 @@ a = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+# ---- drop files the exe never loads --------------------------------------
+# PySide6 ships extras that PyInstaller bundles just because they exist:
+#   opengl32sw.dll                 Qt's software OpenGL renderer. A plain
+#                                  widgets app paints in software anyway, so
+#                                  only GPU-less VMs and bare remote desktops
+#                                  ever reach it. HP_KEEP_SOFTGL=1 keeps it.
+#   qdirect2d.dll                  second Windows platform plugin; the app
+#                                  uses qwindows (kept).
+#   qtiff.dll                      TIFF reader; covers are jpg/png/webp.
+#   libcrypto-3-x64.dll,
+#   libssl-3-x64.dll               Qt's copy of OpenSSL, used only by QtNetwork
+#                                  TLS. The app talks to Discord through
+#                                  requests, which uses the Python copies
+#                                  (libcrypto-3.dll / libssl-3.dll, kept).
+# qwebp.dll and qjpeg.dll stay on purpose: a cover can be a .webp or .jpg.
+import ntpath
+
+_DROP_BINARIES = {
+    "qdirect2d.dll",
+    "qtiff.dll",
+    "libcrypto-3-x64.dll",
+    "libssl-3-x64.dll",
+}
+if os.environ.get("HP_KEEP_SOFTGL") != "1":
+    _DROP_BINARIES.add("opengl32sw.dll")
+
+_kept = []
+for _entry in a.binaries:
+    if ntpath.basename(_entry[0]).lower() in _DROP_BINARIES:
+        print("spec: dropped", _entry[0])
+    else:
+        _kept.append(_entry)
+a.binaries = _kept
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -65,7 +100,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=bool(os.environ.get("HP_UPX")),
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

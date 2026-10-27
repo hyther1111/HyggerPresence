@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.3.2 - 2026-10-28
+
+**In short:** a bug-fix release. VNDB ratings come back on the 0–10 scale,
+`{title}`-style variables work in every text the card shows, and the Detection
+preview draws the small image with its hover text. The exe is built from a clean
+environment, so it is about 32 MB instead of 54 MB.
+
+### Fixed
+- **VNDB rating shown ten times too big.** The new VNDB API returns `rating` and
+  `rating_weighted` on a 0–100 scale (7.61 on vndb.org arrives as 76.1), while
+  the old API used 0–10. Both are normalised to 0–10, so `{rating_average}` and
+  `{rating_weighted}` read the same as on the site. Values already stored in
+  `games.json` are kept as they are, so no library is rewritten.
+- **Variables stayed literal in some texts.** `{title}`, `{session_time}`,
+  `{rating_average}` and the rest worked in the first and second line, but the
+  large image text, the small image text and the button label showed the braces
+  as typed (the user's card read `{title}`). All of them now run through the
+  same substitution.
+- **No small image in the Detection preview.** The preview drew only the large
+  image, so a configured small image could not be checked before saving.
+
+### Added
+- The Detection preview now draws the small image in the corner, and resting the
+  pointer on the big or the small image shows the hover text that Discord would
+  show (`small_text`, or the image reference when it is empty).
+- Settings → Presence says that variables work in the hover texts too.
+
+### Changed
+- `build.bat` builds from a `buildenv\` virtual environment with its own pip
+  cache, and `HyggerPresence.spec` drops binaries the application never loads
+  (`opengl32sw.dll`, `qdirect2d.dll`, `qtiff.dll`, Qt's own OpenSSL DLLs). A
+  fresh build is about 32 MB instead of 54 MB; `HP_KEEP_SOFTGL=1` keeps the
+  software OpenGL and `USE_UPX=1` additionally runs UPX.
+
 ## 2.3.1 - 2026-10-27
 
 **In short:** screenshots of a game upscaled by Magpie come out whole. There is

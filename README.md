@@ -4,10 +4,15 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.1** — the screenshot hotkey captures the whole game even
-while Magpie upscales it, so there is one capture hotkey instead of two. It builds
-on 2.3.0: a Library that can show covers instead of a list and remembers where the
-window was, a *Last read* column, an *Idle* status that stops the clock after a
+Current release: **2.3.2** — a bug-fix release on top of 2.3.1. VNDB ratings
+fetched from the new API are shown on the same 0–10 scale as before instead of
+ten times bigger, the hover texts and the presence text accept the `{title}`
+style variables everywhere (they used to stay literal in the small image text),
+the Detection preview draws the small image and its hover text, and the exe is
+built from a clean environment (about 32 MB instead of 54 MB). It builds on
+2.3.1, which captures the whole game even while Magpie upscales it, and on 2.3.0:
+a Library that can show covers instead of a list and remembers where the window
+was, a *Last read* column, an *Idle* status that stops the clock after a
 configurable number of seconds without input, covers drawn at the screen's pixel
 ratio, and tables whose columns can be dragged, hidden and restored.
 
@@ -75,7 +80,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.1
+cd HyggerPresence/HyggerPresence_2.3.2
 pip install -r requirements.txt
 python main.py
 ```
@@ -86,20 +91,29 @@ python main.py
 build.bat
 ```
 
-The script picks a Python 3 installation that has the dependencies, installs
-PyInstaller if necessary and writes `dist\HyggerPresence.exe` (single file,
-no console). Data files are never bundled; they live in
-`%APPDATA%\HyggerPresence`, so replacing the executable keeps the library and
-playtime.
+The script creates `buildenv\` (a virtual environment with nothing but
+`requirements.txt` and PyInstaller), builds from it and writes
+`dist\HyggerPresence.exe` — one file, no console, about 32 MB. Data files are
+never bundled; they live in `%APPDATA%\HyggerPresence`, so replacing the
+executable keeps the library and playtime.
 
-PyInstaller bundles whatever the chosen Python has installed, so a Python with
-the full `PySide6` package (QML, Quick, PDF, virtual keyboard) or extras such as
-`cryptography` makes the exe about 14 MB bigger for nothing. Building from a
-clean virtual environment with only `requirements.txt` avoids that:
+PyInstaller bundles whatever the chosen Python has installed, so building from a
+Python that also carries the full `PySide6` package (QML, Quick, PDF, WebEngine)
+or extras such as `cryptography` makes the exe about 20 MB bigger for nothing.
+`build.bat` therefore builds from `buildenv\` by default; delete that folder and
+the next build recreates it. `set HP_NO_VENV=1` builds from the installed Python
+instead, `set USE_UPX=1` also runs UPX (smaller, but antivirus bait), and
+`set HP_KEEP_SOFTGL=1` keeps Qt's software OpenGL (`opengl32sw.dll`, 20 MB) for
+machines without a GPU driver.
+
+The spec drops binaries the application never loads (`opengl32sw.dll`,
+`qdirect2d.dll`, `qtiff.dll` and Qt's own OpenSSL DLLs; the HTTP client uses
+Python's), which takes the exe from 54 MB to 32 MB. Only `requirements.txt` is
+needed to reproduce it:
 
 ```bat
 python -m venv buildenv
-buildenv\Scripts\pip install -r HyggerPresence_2.3.1\requirements.txt pyinstaller
+buildenv\Scripts\pip install -r HyggerPresence_2.3.2\requirements.txt pyinstaller
 buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
 ```
 
@@ -272,7 +286,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.1/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.2/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log
