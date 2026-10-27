@@ -7221,11 +7221,20 @@ class MainWindow(ScreenshotMixin, QMainWindow):
     def request_cover(self, url, callback):
         if not url:
             return
+        # A url can be wanted by more than one widget at a time: the library
+        # card and the preview on Detection ask for the same picture, and the
+        # late sweep asks again. Keep every callback: keying one callback per
+        # url meant the last caller silently stole the others, which is why a
+        # cover showed up in the grid but stayed blank in the preview.
+        waiters = self._cover_callbacks.setdefault(url, [])
+        if callback not in waiters:
+            waiters.append(callback)
         if url in self.app.cover_cache:
             cached = self.app.cover_cache[url]
             # "None" means an earlier decode failed. Retry once per session
             # instead of painting that card blank until the app is restarted.
             if cached is not None or url in self.app.cover_retried:
+                self._cover_callbacks.pop(url, None)
                 callback(url, cached)
                 return
             self.app.cover_retried.add(url)
@@ -7233,11 +7242,10 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         on_disk = cover_bytes_from_disk(url)
         if on_disk is not None:
             self.app.cover_bytes[url] = on_disk
-            self._cover_callbacks[url] = callback
             self._start_cover_drain()
             return
-        self._cover_callbacks[url] = callback
         if url in self.app.cover_pending:
+            self._start_cover_drain()
             return
         self.app.cover_pending.add(url)
         self._start_cover_drain()
@@ -7268,23 +7276,26 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             else:
                 self.app.cover_cache[url] = None
             self.app.cover_bytes.pop(url, None)
-        for url, callback in list(self._cover_callbacks.items()):
+        for url, callbacks in list(self._cover_callbacks.items()):
             if url in self.app.cover_cache:
                 self._cover_callbacks.pop(url, None)
-                try:
-                    callback(url, self.app.cover_cache[url])
-                except Exception:
-                    pass
+                image = self.app.cover_cache[url]
+                for callback in callbacks:
+                    try:
+                        callback(url, image)
+                    except Exception:
+                        pass
             elif url not in self.app.cover_bytes and url not in self.app.cover_pending:
                 # the worker finished without pixels (404, offline, broken
                 # jpeg). Give up on it: keeping the callback would keep the
                 # drain timer polling every 300 ms for the rest of the session,
                 # which is exactly the kind of idle wakeup 2.2.0 removes.
                 self._cover_callbacks.pop(url, None)
-                try:
-                    callback(url, None)
-                except Exception:
-                    pass
+                for callback in callbacks:
+                    try:
+                        callback(url, None)
+                    except Exception:
+                        pass
         # nothing left to decode: stop waking up three times a second
         if not self._cover_callbacks and not self.app.cover_bytes:
             self.cover_timer.stop()

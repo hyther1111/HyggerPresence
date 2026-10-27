@@ -20,6 +20,12 @@ environment, so it is about 32 MB instead of 54 MB.
   callback could be dropped and the card painted "VN" for the rest of the
   session. One late sweep now retries any card that is still empty, and a cover
   that failed to decode is retried once instead of being remembered as broken.
+- **The preview cover stayed blank when the grid already had it.** Cover
+  callbacks were stored one per URL, so when the library card and the Detection
+  preview asked for the same picture the later caller replaced the earlier one
+  and only one of them was ever painted. Every waiting widget is now called; this
+  is why the preview showed a cover only after the card had been paged in
+  first.
 - **Custom small images from imgur answered 429.** The HTTP client sent the
   stock `python-requests` user agent, which imgur rate-limits; it now sends
   `HyggerPresence/2.3.2`, so the same URL loads.
