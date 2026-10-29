@@ -1,4 +1,4 @@
-"""Hygger Presence 2.3.2 - HTTP through Windows' own WinHTTP.
+"""Hygger Presence 2.3.3 - HTTP through Windows' own WinHTTP.
 
 The app makes a handful of plain requests: the VNDB API and cover page, cover
 images, the GitHub release check and the update download. requests did that by
@@ -16,7 +16,7 @@ import threading
 from ctypes import wintypes
 from urllib.parse import urlsplit
 
-DEFAULT_AGENT = "HyggerPresence/2.3.2 (+https://github.com/hyther1111/HyggerPresence)"
+DEFAULT_AGENT = "HyggerPresence/2.3.3 (+https://github.com/hyther1111/HyggerPresence)"
 
 _ACCESS_TYPE_DEFAULT_PROXY = 0
 _ACCESS_TYPE_AUTOMATIC_PROXY = 4           # Windows 8.1+: WPAD, PAC and IE settings

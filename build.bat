@@ -21,7 +21,7 @@ setlocal
 cd /d "%~dp0"
 
 REM Source folder to package. Bump this when the folder is renamed for a release.
-set "APPSRC=HyggerPresence_2.3.2"
+set "APPSRC=HyggerPresence_2.3.3"
 
 REM ---- find a Python 3.11 or newer -----------------------------------------
 set "PY="

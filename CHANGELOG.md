@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 2.3.3 - 2026-10-29
+
+**In short:** the same app in a smaller download. The exe is about 23 MB
+instead of 33 MB; nothing about the library, settings or playtime changes.
 
 ### Changed
 - **The exe is about 23 MB instead of 33 MB.** HTTP (VNDB, covers, the update

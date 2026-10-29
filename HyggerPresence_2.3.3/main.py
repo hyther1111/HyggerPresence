@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hygger Presence 2.3.2 - Qt UI.
+"""Hygger Presence 2.3.3 - Qt UI.
 
     python main.py
 

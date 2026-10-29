@@ -4,13 +4,14 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.2** — a bug-fix release on top of 2.3.1. VNDB ratings
-fetched from the new API are shown on the same 0–10 scale as before instead of
-ten times bigger, the hover texts and the presence text accept the `{title}`
-style variables everywhere (they used to stay literal in the small image text),
-the Detection preview draws the small image and its hover text, and the exe is
-built from a clean environment (about 32 MB instead of 54 MB). It builds on
-2.3.1, which captures the whole game even while Magpie upscales it, and on 2.3.0:
+Current release: **2.3.3** — the same app in a smaller download: about 23 MB
+instead of 33 MB. Web requests (VNDB, covers, updates) go through Windows' own
+WinHTTP, so the exe no longer carries `requests` and OpenSSL, and the Qt pieces,
+translations and Python modules the app never loads are left out. It builds on
+2.3.2, which shows VNDB ratings on the 0–10 scale again, accepts the `{title}`
+style variables in every text and draws the small image in the Detection
+preview; on 2.3.1, which captures the whole game even while Magpie upscales it;
+and on 2.3.0:
 a Library that can show covers instead of a list and remembers where the window
 was, a *Last read* column, an *Idle* status that stops the clock after a
 configurable number of seconds without input, covers drawn at the screen's pixel
@@ -80,7 +81,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.2
+cd HyggerPresence/HyggerPresence_2.3.3
 pip install -r requirements.txt
 python main.py
 ```
@@ -116,7 +117,7 @@ Only `requirements.txt` is needed to reproduce it:
 
 ```bat
 python -m venv buildenv
-buildenv\Scripts\pip install -r HyggerPresence_2.3.2\requirements.txt pyinstaller
+buildenv\Scripts\pip install -r HyggerPresence_2.3.3\requirements.txt pyinstaller
 buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
 ```
 
@@ -289,7 +290,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.2/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.3/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log

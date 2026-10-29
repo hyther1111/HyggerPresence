@@ -2118,7 +2118,7 @@ def menu_qss(window):
     values = dict(getattr(window, "palette", None) or {})
     values.setdefault("menuarrow", menu_arrow_icon_path())
     return MENU_QSS % values
-APP_VERSION = "2.3.2"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.3.3"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -7481,7 +7481,7 @@ class Application:
         # shutdown() so "Later" really means "when you close the app"
         self.pending_update = None
 
-    USER_AGENT = ("HyggerPresence/2.3.2 "
+    USER_AGENT = ("HyggerPresence/2.3.3 "
                   "(+https://github.com/hyther1111/HyggerPresence)")
 
     def fetch(self, url):
