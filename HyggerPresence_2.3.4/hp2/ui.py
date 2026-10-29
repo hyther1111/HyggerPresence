@@ -356,6 +356,7 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     QFrame#routerow {{ background: transparent; border: none; }}
     /* the caption line and the total line sit on the card itself, not on a band */
     QWidget#routeshead, QWidget#routestotal {{ background: transparent; }}
+    QWidget#previewtimer {{ background: transparent; }}
     QLabel#totalvalue {{ color: {p['text']}; font-size: 13px; font-weight: 600; }}
     QPushButton#ghost {{ background: transparent; color: {p['subtext']};
                border: 1px solid {p['border']}; border-radius: 7px; padding: 6px 12px; }}
@@ -560,6 +561,25 @@ def gamepad_pixmap(colour="#b5bac1", size=14, ratio=None):
     painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
     painter.end()
     return canvas
+
+
+def square_pixmap(pixmap, size):
+    """Cover-crop a pixmap to a square, so a full-radius clip is a circle."""
+    if pixmap is None:
+        return pixmap
+    if not isinstance(pixmap, QPixmap):
+        pixmap = QPixmap.fromImage(pixmap)
+    if pixmap.isNull():
+        return pixmap
+    ratio = pixmap.devicePixelRatio() or 1.0
+    pixels = int(round(size * ratio))
+    scaled = pixmap.scaled(pixels, pixels, Qt.KeepAspectRatioByExpanding,
+                           Qt.SmoothTransformation)
+    left = max(0, (scaled.width() - pixels) // 2)
+    top = max(0, (scaled.height() - pixels) // 2)
+    cropped = scaled.copy(left, top, pixels, pixels)
+    cropped.setDevicePixelRatio(ratio)
+    return cropped
 
 
 def elapsed_stamp(seconds):
@@ -845,8 +865,17 @@ def rounded_pixmap(pixmap, radius):
         return pixmap
     ratio = pixmap.devicePixelRatio() or 1.0
     path = QPainterPath()
-    path.addRoundedRect(QRectF(pixmap.rect()), radius * ratio, radius * ratio)
-    result = QPixmap(pixmap.size())
+    box = QRectF(pixmap.rect())
+    # A radius of half the shorter side is a circle; Qt draws that as a square
+    # when it is handed a rounded rect, so ask for an ellipse in that case.
+    short = min(box.width(), box.height())
+    if radius * ratio * 2 >= short - 0.01:
+        path.addEllipse(box)
+    else:
+        path.addRoundedRect(box, radius * ratio, radius * ratio)
+    # The result needs a real alpha channel: QPixmap.fill(Qt.transparent) on a
+    # plain pixmap turns black on Windows instead of transparent.
+    result = QImage(pixmap.size(), QImage.Format_ARGB32_Premultiplied)
     result.setDevicePixelRatio(ratio)
     result.fill(Qt.transparent)
     painter = QPainter(result)
@@ -854,7 +883,7 @@ def rounded_pixmap(pixmap, radius):
     painter.setClipPath(path)
     painter.drawPixmap(0, 0, pixmap)
     painter.end()
-    return result
+    return QPixmap.fromImage(result)
 
 
 COVER_WORKERS = 4                   # parallel cover downloads
@@ -1852,6 +1881,7 @@ class NowPage(Page):
         self.prev_timer_icon.setFixedSize(16, 14)
         self.prev_timer_icon.setPixmap(gamepad_pixmap())
         self.prev_timer_row = QWidget()
+        self.prev_timer_row.setObjectName("previewtimer")
         timer_line = QHBoxLayout(self.prev_timer_row)
         timer_line.setContentsMargins(0, 0, 0, 0)
         timer_line.setSpacing(5)
@@ -2079,26 +2109,23 @@ class NowPage(Page):
             self.prev_small.setText("\u25cf")
 
     def _style_small_badge(self):
-        """The ring around the small image follows the card it sits on."""
+        """Keep the small image transparent and paint the timer Discord green."""
         palette = getattr(self.window, "palette", None) or {}
-        ring = palette.get("surface") or "#1e1f22"
-        subtext = palette.get("subtext") or "#b5bac1"
-        if getattr(self, "_small_badge_ring", None) == (ring, subtext):
+        surface = QColor(palette.get("surface") or "#191a1c")
+        green = "#57f287" if surface.lightnessF() < 0.5 else "#345e2e"
+        if getattr(self, "_small_badge_ring", None) == green:
             return
-        self._small_badge_ring = (ring, subtext)
-        self.prev_small.setStyleSheet(
-            "QLabel{background:%s;border:3px solid %s;border-radius:17px;"
-            "color:%s;font-size:10pt;}" % (ring, ring, subtext))
-        self.prev_timer.setStyleSheet("color:%s;font-size:8pt;" % subtext)
-        self.prev_timer_icon.setPixmap(gamepad_pixmap(subtext))
+        self._small_badge_ring = green
+        self.prev_small.setStyleSheet("background: transparent;")
+        self.prev_timer.setStyleSheet("color:%s;font-size:8pt;" % green)
+        self.prev_timer_icon.setPixmap(gamepad_pixmap(green))
 
     def _apply_small(self, url, image):
         if image is None or getattr(self, "_small_image", None) != url:
             return
         self.prev_small.setText("")
-        self.prev_small.setPixmap(rounded_pixmap(
-            scaled_for(image, 34, 34, self.prev_small,
-                       Qt.KeepAspectRatioByExpanding), 17))
+        square = square_pixmap(image, 34)
+        self.prev_small.setPixmap(rounded_pixmap(square, 17))
 
     def _show_engine_error(self):
         error = (self.engine.last_error or "").strip()
