@@ -3,8 +3,8 @@
 
     python main.py
 
-Needs: PySide6, pypresence, psutil, requests, Pillow (the engine reuses the
-detection code from the 1.x package, which lives next to this folder).
+Needs: PySide6, pypresence, psutil. HTTP goes through Windows' WinHTTP
+(hp2/net.py), so there is no requests / OpenSSL dependency.
 """
 import os
 import sys

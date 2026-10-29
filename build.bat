@@ -113,7 +113,7 @@ echo.
 echo == done: dist\HyggerPresence.exe ==
 for %%f in ("dist\HyggerPresence.exe") do (
     echo size: %%~zf bytes
-    if %%~zf GTR 45000000 echo WARNING: expected about 32 MB - HP_NO_VENV or a full PySide6 build?
+    if %%~zf GTR 30000000 echo WARNING: expected about 23 MB - HP_NO_VENV or a full PySide6 build?
 )
 echo Copy the exe anywhere and run it; the library and settings stay in %%APPDATA%%\HyggerPresence.
 goto :eof

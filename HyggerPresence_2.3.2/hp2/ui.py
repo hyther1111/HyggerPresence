@@ -7466,7 +7466,6 @@ class Application:
         self.cover_retried = set()
         self.cover_queue = queue.Queue()
         self.cover_workers = 0
-        self.session = None
         from .core import set_debug_enabled
         set_debug_enabled(bool(self.config.get("debug_log", False)))
         self.engine = Engine(
@@ -7486,15 +7485,13 @@ class Application:
                   "(+https://github.com/hyther1111/HyggerPresence)")
 
     def fetch(self, url):
-        import requests
-        if self.session is None:
-            self.session = requests.Session()
-            # imgur answers the default "python-requests" agent with 429, which
-            # is why a perfectly good small image never showed up. A real UA
-            # (and no keep-alive surprises) makes the same URL work.
-            self.session.headers.update({"User-Agent": self.USER_AGENT,
-                                         "Accept": "image/*,*/*;q=0.8"})
-        response = self.session.get(url, timeout=(4, 15))
+        from . import net
+        # imgur answers a generic agent (requests' "python-requests") with 429,
+        # which is why a perfectly good small image never showed up. A real UA
+        # makes the same URL work.
+        response = net.get(url, timeout=(4, 15),
+                           headers={"User-Agent": self.USER_AGENT,
+                                    "Accept": "image/*,*/*;q=0.8"})
         response.raise_for_status()
         return response.content
 

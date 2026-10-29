@@ -1,7 +1,7 @@
 """Hygger Presence 1.0.4 - VNDB API."""
 import re
 
-import requests
+from . import net
 
 
 COVER_PATTERN = re.compile(r"https://t\.vndb\.org/cv/[A-Za-z0-9_/]+\.jpg")
@@ -19,8 +19,8 @@ def parse_cover_urls(html):
 
 def cover_urls(vndb_id, timeout=12):
     """Covers of a VN by scraping its cover page (the API only exposes one)."""
-    response = requests.get("https://vndb.org/%s/cv" % vndb_id, timeout=timeout,
-                            headers={"User-Agent": "HyggerPresence/2.0"})
+    response = net.get("https://vndb.org/%s/cv" % vndb_id, timeout=timeout,
+                       headers={"User-Agent": "HyggerPresence/2.0"})
     response.raise_for_status()
     return parse_cover_urls(response.text)
 
@@ -39,7 +39,7 @@ def fetch_vndb(vndb_id):
                 "released,developers.name,average,rating,votecount"
             ),
         }
-        r = requests.post(
+        r = net.post(
             "https://api.vndb.org/kana/vn",
             json=payload,
             headers={"Content-Type": "application/json"},

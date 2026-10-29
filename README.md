@@ -93,7 +93,7 @@ build.bat
 
 The script creates `buildenv\` (a virtual environment with nothing but
 `requirements.txt` and PyInstaller), builds from it and writes
-`dist\HyggerPresence.exe` — one file, no console, about 32 MB. Data files are
+`dist\HyggerPresence.exe` — one file, no console, about 23 MB. Data files are
 never bundled; they live in `%APPDATA%\HyggerPresence`, so replacing the
 executable keeps the library and playtime.
 
@@ -106,10 +106,13 @@ instead, `set USE_UPX=1` also runs UPX (smaller, but antivirus bait), and
 `set HP_KEEP_SOFTGL=1` keeps Qt's software OpenGL (`opengl32sw.dll`, 20 MB) for
 machines without a GPU driver.
 
-The spec drops binaries the application never loads (`opengl32sw.dll`,
-`qdirect2d.dll`, `qtiff.dll` and Qt's own OpenSSL DLLs; the HTTP client uses
-Python's), which takes the exe from 54 MB to 32 MB. Only `requirements.txt` is
-needed to reproduce it:
+The spec drops what the application never loads: `opengl32sw.dll`, the other
+platform plugins, unused image formats, QtNetwork and its plugins, Qt's own
+translations except Chinese, the duplicate VC++ runtime copies and standard
+library modules nothing reaches. HTTP goes through Windows' WinHTTP
+(`hp2/net.py`), so neither `requests` nor OpenSSL is bundled, and the bytecode
+is built with `-OO`. Together that takes the exe from 54 MB to about 23 MB.
+Only `requirements.txt` is needed to reproduce it:
 
 ```bat
 python -m venv buildenv

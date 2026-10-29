@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import requests
+from . import net
 
 GITHUB_REPO = "hyther1111/HyggerPresence"
 
@@ -32,8 +32,8 @@ def is_newer(candidate, current):
 def latest_release(timeout=12):
     """-> dict(status='ok'|'no-release', version, url, notes, assets) or raises."""
     url = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
-    response = requests.get(url, timeout=timeout,
-                            headers={"Accept": "application/vnd.github+json"})
+    response = net.get(url, timeout=timeout,
+                       headers={"Accept": "application/vnd.github+json"})
     if response.status_code == 404:
         return {"status": "no-release",
                 "url": "https://github.com/%s/releases" % GITHUB_REPO}
@@ -73,7 +73,7 @@ def download(asset, target, timeout=120, progress=None):
     caller can show a percentage. total is 0 when the server sends no
     Content-Length.
     """
-    with requests.get(asset["browser_download_url"], stream=True, timeout=timeout) as response:
+    with net.get(asset["browser_download_url"], stream=True, timeout=timeout) as response:
         response.raise_for_status()
         try:
             total = int(response.headers.get("Content-Length") or 0)

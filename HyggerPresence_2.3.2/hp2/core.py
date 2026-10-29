@@ -14,13 +14,11 @@ import ctypes
 from ctypes import wintypes
 from pathlib import Path
 
-import requests
 import psutil
 
 import re
 import threading
 import time
-import requests
 import ctypes
 from ctypes import wintypes
 from pathlib import Path

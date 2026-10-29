@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **The exe is about 23 MB instead of 33 MB.** HTTP (VNDB, covers, the update
+  check and download) goes through Windows' own WinHTTP in `hp2/net.py`, so
+  `requests`, urllib3, certifi and Python's OpenSSL are no longer bundled;
+  TLS uses the Windows certificate store and the system proxy. The spec also
+  leaves out QtNetwork and its plugins, unused platform and image-format
+  plugins, Qt's translations other than Chinese, the duplicate VC++ runtime
+  copies and standard library modules nothing reaches, builds the bytecode with
+  `-OO` and compresses it at zlib level 9. `icon.ico` stores its large sizes
+  as PNG (same pixels, 364 KB -> 167 KB). `requests` and the unused `Pillow`
+  left `requirements.txt`.
+
 ## 2.3.2 - 2026-10-28
 
 **In short:** a bug-fix release. VNDB ratings come back on the 0–10 scale,
