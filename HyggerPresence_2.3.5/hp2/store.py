@@ -51,6 +51,8 @@ DEFAULT_CONFIG = {
     "close_to_tray": True,
     # 2.3.0: configurable idle timeout, library layout and remembered UI state
     "idle_seconds": 300,
+    # 2.3.4: master switch for the clocks (the Detection page's Record Time)
+    "record_time": True,
     "window": {},                   # w/h/x/y/max remembered on quit
     "ui": {},                       # column widths, header states
     "screenshot": {"path": "", "hotkey": "", "sound": "",

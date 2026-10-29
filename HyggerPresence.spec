@@ -12,7 +12,7 @@ import os
 
 # HP_APP_DIR lets a test build point at another copy of the sources without
 # editing this file, e.g. set HP_APP_DIR=HyggerPresence_2.1.1_pretest
-APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.3.4")
+APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.3.5")
 ICON = str(APP_DIR / "icon.ico")
 
 datas = [

@@ -93,7 +93,7 @@ class Engine(DetectorMixin):
     """Detection + presence. Poll `tick()` about once a second from the UI thread."""
 
     def __init__(self, client_id="", templates=None, stats=None, on_change=None,
-                 presence=None, idle_seconds=None):
+                 presence=None, idle_seconds=None, record_time=True):
         self.games = []
         # how long the user may be away before the card says Idle
         self.idle_seconds = self._clamp_idle(idle_seconds)
@@ -134,6 +134,9 @@ class Engine(DetectorMixin):
         self.rpc = None
         self._rpc_lock = threading.RLock()
         self.presence_enabled = True
+        # master switch for every clock (the UI's Record Time button): off means
+        # no session time, no total, nothing in stats.db and no timer on the card
+        self.record_time = bool(record_time)
         self.game = None
         self.status = None
         self.preview = {}
@@ -810,6 +813,10 @@ class Engine(DetectorMixin):
             self._reading_start = None
             self.session_seconds = self._session_accumulated
             self.total_seconds = game.get("total_seconds", 0)
+        if not self.record_time:
+            # Record Time is off: the clock never starts, so no stretch is ever
+            # banked into the session, the total or stats.db while it stays off
+            return
         if status == "Reading":
             if self._reading_start is None:
                 self._reading_start = now
@@ -1215,7 +1222,8 @@ class Engine(DetectorMixin):
             "details": _clip(details, 128),
             "state": _clip(state, 128),
             "status": status,
-            "start": int(time.time() - self.session_seconds) if status == "Reading" else None,
+            "start": (int(time.time() - self.session_seconds)
+                      if status == "Reading" and self.record_time else None),
             "image": custom_large if use_custom_large else game.get("image") or "",
             "large_image": custom_large if use_custom_large else "",
             "small_image": small,
@@ -1339,6 +1347,27 @@ class Engine(DetectorMixin):
         else:
             self._last_sent = 0.0
         self._notify()
+
+    def set_record_time(self, enabled):
+        """Turn every clock on or off; the time recorded so far is kept.
+
+        Switching off banks the stretch that is still running and then leaves
+        the clock stopped, so a game that is already open adds nothing to the
+        session, the total or stats.db until this is switched back on. The next
+        tick picks the clock up where the session stands.
+        """
+        enabled = bool(enabled)
+        if enabled == self.record_time:
+            return enabled
+        if not enabled:
+            self._flush()               # bank what already ran, then stop dead
+            self._reading_start = None
+        self.record_time = enabled
+        # republish: the card loses its elapsed timer, or gets it back
+        self._pushed_status = None
+        self._last_sent = 0.0
+        self._notify()
+        return enabled
 
     def flush_open_segment(self):
         """Write the Running segment to stats.db without stopping the clock."""

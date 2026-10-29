@@ -36,7 +36,7 @@ import csv
 from datetime import datetime, timedelta
 
 # ====================== CONFIG ======================
-APP_VERSION = "2.3.4"          # bump on every release (match the GitHub tag)
+APP_VERSION = "2.3.5"          # bump on every release (match the GitHub tag)
 GITHUB_REPO = "hyther1111/HyggerPresence"   # owner/repo - used by Check Update
 
 

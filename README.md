@@ -4,14 +4,17 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.4** — every route now carries two numbers: the time
-spent in that route and the playtime reached when it ends. Typing either one
-fills the other in, a total strip under the list shows the last accumulated
-time, and *Set current time* fills the last route with the playtime the app has
-recorded so far. It builds on 2.3.2, a bug-fix release on top of 2.3.1: VNDB
-ratings fetched from the new API are shown on the same 0–10 scale as before
-instead of ten times bigger, the hover texts and the presence text accept the
-`{title}` style variables everywhere (they used to stay literal in the small
+Current release: **2.3.5** — a *Record Time* switch on the Detection page turns
+every clock off in one go: the session, the total, the statistics and the timer
+on the Discord card all stop, and whatever was already recorded is kept. The
+routes card also stays on screen as soon as a game is seen, with just its name
+and the `+` until the first route arrives, the `+` moved up next to the total,
+and *Set current time* became a green button. It builds on 2.3.4, where every
+route carries two numbers — the time spent in it and the playtime reached when
+it ends, each filling the other in — and on 2.3.2, a bug-fix release on top of
+2.3.1: VNDB ratings fetched from the new API are shown on the same 0–10 scale as
+before instead of ten times bigger, the hover texts and the presence text accept
+the `{title}` style variables everywhere (they used to stay literal in the small
 image text), the Detection preview draws the small image and its hover text, and
 the exe is built from a clean environment (about 32 MB instead of 54 MB). It builds on
 2.3.1, which captures the whole game even while Magpie upscales it, and on 2.3.0:
@@ -87,7 +90,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.4
+cd HyggerPresence/HyggerPresence_2.3.5
 pip install -r requirements.txt
 python main.py
 ```
@@ -120,7 +123,7 @@ needed to reproduce it:
 
 ```bat
 python -m venv buildenv
-buildenv\Scripts\pip install -r HyggerPresence_2.3.4\requirements.txt pyinstaller
+buildenv\Scripts\pip install -r HyggerPresence_2.3.5\requirements.txt pyinstaller
 buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
 ```
 
@@ -154,9 +157,13 @@ Some visual novels are long enough that you want to know how much time went into
 each part, chapter or ending. A game can therefore carry a list of **routes**, and
 the time in each one is typed in by hand:
 
-- The Detection page has a **Routes** card: the routes of the game that is running,
-  each with the time spent in it. Press **+** and a row appears with a name field,
-  a time field and a red bin; the time is saved when the field loses focus.
+- The Detection page has a **Routes** card that is there as soon as a game is
+  seen: with no route yet it shows only its name and the **+**, and the *Route
+  time* / *Accumulative* columns appear with the first row. Press **+** (it sits
+  on the total line) and a row appears with a name field, a time field and a red
+  bin; the time is saved when the field loses focus.
+- The card closes with the total and a green **Set current time** button, which
+  copies the playtime the app has recorded into the last route.
 - Times are typed as `1h 30m`, `1:30` or `90`. The bin removes the route and its
   time (with a confirmation).
 - The same list is in Library → Edit → **Routes**, so a game can be filled in
@@ -174,6 +181,9 @@ the time in each one is typed in by hand:
 - Optional elapsed timer and a single optional button.
 - Presence can be disabled globally from the Detection page or the tray icon;
   playtime continues to be recorded.
+- **Record Time** next to it stops every clock instead: the session, the total,
+  the statistics and the timer on the card all freeze, and what was already
+  recorded is kept. Turning it back on picks the session up where it stopped.
 
 ### Statistics
 - Playtime stored in SQLite.
@@ -293,7 +303,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.4/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.5/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log

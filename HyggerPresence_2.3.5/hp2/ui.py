@@ -347,6 +347,8 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
                font-size: 15px; font-weight: 600; }}
     QToolButton#add:hover {{ border-color: {p['accent']}; color: {p['accent']}; }}
     QToolButton#add:pressed {{ background: {p['border']}; }}
+    QToolButton#add:disabled {{ background: transparent; color: {p['subtext']};
+               border: 1px dashed {p['border']}; }}
     QToolButton#bin {{ background: transparent; border: 1px solid {p['border']};
                border-radius: 7px; }}
     QToolButton#bin:hover {{ background: rgba(178, 58, 58, 0.18); border-color: #b23a3a; }}
@@ -580,6 +582,12 @@ def square_pixmap(pixmap, size):
     cropped = scaled.copy(left, top, pixels, pixels)
     cropped.setDevicePixelRatio(ratio)
     return cropped
+
+
+def ink_on(colour):
+    """Black or white, whichever is readable on top of `colour`."""
+    tint = QColor(colour)
+    return "#0b1114" if tint.lightnessF() > 0.55 else "#ffffff"
 
 
 def elapsed_stamp(seconds):
@@ -1762,6 +1770,11 @@ class NowPage(Page):
         title.setObjectName("h1")
         head.addWidget(title)
         head.addStretch(1)
+        self.record_button = QPushButton()
+        self.record_button.setToolTip(
+            tr("Record Time: count the session, the total and the statistics"))
+        self.record_button.clicked.connect(self.toggle_record_time)
+        head.addWidget(self.record_button)
         self.presence_button = QPushButton()
         self.presence_button.clicked.connect(self.toggle_presence)
         head.addWidget(self.presence_button)
@@ -1950,6 +1963,20 @@ class NowPage(Page):
         except Exception:
             pass
 
+    def toggle_record_time(self):
+        """Stop or resume every clock; the choice is remembered in config.json."""
+        enabled = self.engine.set_record_time(not self.engine.record_time)
+        self.window.config["record_time"] = bool(enabled)
+        try:
+            store.save_config(self.window.config)
+        except Exception:
+            pass
+        self.update_from_engine()
+        try:
+            self.window._refresh_tray_menu()
+        except Exception:
+            pass
+
     def open_vndb(self):
         if self.engine.game and self.engine.game.get("vndb_id"):
             from PySide6.QtGui import QDesktopServices
@@ -1985,6 +2012,7 @@ class NowPage(Page):
         # is identical, and the clock has its own timer.
         stamp = (engine.status, id(engine.game), getattr(engine, "total_seconds", None),
                  engine.last_error, engine.presence_enabled,
+                 getattr(engine, "record_time", True),
                  repr(engine.preview))
         if stamp == getattr(self, "_stamp", None):
             return
@@ -1993,9 +2021,18 @@ class NowPage(Page):
         enabled = self.engine.presence_enabled
         self.presence_button.setText(tr("Presence: ON") if enabled else tr("Presence: OFF"))
         self.presence_button.setStyleSheet(
-            "QPushButton{background:%s;color:#fff;border:none;border-radius:7px;"
+            "QPushButton{background:%s;color:%s;border:none;border-radius:7px;"
             "padding:7px 14px;font-weight:600;}"
-            % (theme["green"] if enabled else theme["red"]))
+            % (theme["green"] if enabled else theme["red"],
+               ink_on(theme["green"]) if enabled else "#ffffff"))
+        recorded = bool(getattr(self.engine, "record_time", True))
+        self.record_button.setText(
+            tr("Record Time: ON") if recorded else tr("Record Time: OFF"))
+        self.record_button.setStyleSheet(
+            "QPushButton{background:%s;color:%s;border:none;border-radius:7px;"
+            "padding:7px 14px;font-weight:600;}"
+            % (theme["green"] if recorded else theme["surface2"],
+               ink_on(theme["green"]) if recorded else theme["subtext"]))
         preview = self.engine.preview or {}
         if not preview:
             self.title_label.setText(tr("No game yet"))
@@ -2211,7 +2248,7 @@ def menu_qss(window):
     values = dict(getattr(window, "palette", None) or {})
     values.setdefault("menuarrow", menu_arrow_icon_path())
     return MENU_QSS % values
-APP_VERSION = "2.3.4"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.3.5"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -5607,17 +5644,18 @@ class RoutesEditor(QWidget):
         head.setSpacing(8)
         title = QLabel(tr("ROUTES"))
         title.setObjectName("caps")
-        route_head = QLabel(tr("ROUTE TIME"))
-        route_head.setObjectName("caps")
-        route_head.setFixedWidth(124)
-        route_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        acc_head = QLabel(tr("ACCUMULATIVE"))
-        acc_head.setObjectName("caps")
-        acc_head.setFixedWidth(124)
-        acc_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # the two time columns only make sense once there is a route to describe
+        self.route_head = QLabel(tr("ROUTE TIME"))
+        self.route_head.setObjectName("caps")
+        self.route_head.setFixedWidth(124)
+        self.route_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.acc_head = QLabel(tr("ACCUMULATIVE"))
+        self.acc_head.setObjectName("caps")
+        self.acc_head.setFixedWidth(124)
+        self.acc_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         head.addWidget(title, 1)
-        head.addWidget(route_head)
-        head.addWidget(acc_head)
+        head.addWidget(self.route_head)
+        head.addWidget(self.acc_head)
         head.addSpacing(49)
         layout.addWidget(self.head)
 
@@ -5627,16 +5665,26 @@ class RoutesEditor(QWidget):
         self.rows_box.setAlignment(Qt.AlignTop)
         layout.addLayout(self.rows_box)
 
-        # the total is a plain line of text under the rows, not another box
+        # the total is a plain line of text under the rows, not another box, and
+        # it carries the + as well: one row for both keeps the card short and
+        # puts the button right where the next route is going to appear
         self.total_row = QWidget()
         self.total_row.setObjectName("routestotal")
         total_line = QHBoxLayout(self.total_row)
-        total_line.setContentsMargins(0, 8, 0, 2)
+        total_line.setContentsMargins(0, 8, 0, 0)
         total_line.setSpacing(8)
+        self.add_button = QToolButton()
+        self.add_button.setObjectName("add")
+        self.add_button.setText("+")
+        self.add_button.setToolTip(tr("Add a route"))
+        self.add_button.setCursor(Qt.PointingHandCursor)
+        self.add_button.setFixedSize(32, 30)
+        self.add_button.clicked.connect(self.add_row)
+        total_line.addWidget(self.add_button, 0, Qt.AlignLeft)
         total_line.addStretch(1)
-        total_caps = QLabel(tr("TOTAL"))
-        total_caps.setObjectName("caps")
-        total_line.addWidget(total_caps)
+        self.total_caps = QLabel(tr("TOTAL"))
+        self.total_caps.setObjectName("caps")
+        total_line.addWidget(self.total_caps)
         self.total_value = QLabel("")
         self.total_value.setObjectName("totalvalue")
         self.total_value.setFixedWidth(124)
@@ -5647,19 +5695,18 @@ class RoutesEditor(QWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        self.add_button = QToolButton()
-        self.add_button.setObjectName("add")
-        self.add_button.setText("+")
-        self.add_button.setToolTip(tr("Add a route"))
-        self.add_button.setCursor(Qt.PointingHandCursor)
-        self.add_button.setFixedSize(32, 30)
-        self.add_button.clicked.connect(self.add_row)
-        actions.addWidget(self.add_button, 0, Qt.AlignLeft)
         actions.addStretch(1)
         self.set_button = QPushButton(tr("Set current time"))
-        self.set_button.setObjectName("ghost")
         self.set_button.setCursor(Qt.PointingHandCursor)
         self.set_button.setToolTip(tr("Use the playtime the app has recorded so far"))
+        # the ghost style left it looking like a caption; this is the card's action
+        self.set_button.setStyleSheet(
+            "QPushButton{background:#16a34a;color:#ffffff;border:none;"
+            "border-radius:7px;padding:6px 14px;font-weight:600;}"
+            "QPushButton:hover{background:#15803d;}"
+            "QPushButton:pressed{background:#166534;}"
+            "QPushButton:disabled{background:transparent;color:#6b7280;"
+            "border:1px solid #4b5563;font-weight:400;}")
         self.set_button.clicked.connect(self.set_current)
         actions.addWidget(self.set_button)
         layout.addLayout(actions)
@@ -5728,12 +5775,18 @@ class RoutesEditor(QWidget):
         from .core import format_time
         entries = self._entries() if entries is None else entries
         has_rows = bool(entries)
-        self.head.setVisible(has_rows)
-        self.total_row.setVisible(has_rows)
+        # the card stays on screen with no routes at all: ROUTES is the caption
+        # that always makes sense, the two time columns arrive with the first row
+        self.head.setVisible(True)
+        for caption in (self.route_head, self.acc_head, self.total_caps,
+                        self.total_value):
+            caption.setVisible(has_rows)
+        self.total_row.setVisible(True)
         self.total_value.setText(format_time(entries[-1]["acc"]) if has_rows else "")
         has_game = bool(self.game)
         self.add_button.setEnabled(has_game)
-        self.set_button.setEnabled(has_game and has_rows)
+        # with no route yet the button still answers with what to do first
+        self.set_button.setEnabled(has_game)
         self.hint.setVisible(not self.rows)
 
     def _resync(self):
@@ -7705,7 +7758,8 @@ class Application:
             templates=self.config.get("templates") or DEFAULT_TEMPLATES,
             stats=self.stats,
             presence=self.config.get("presence") or {},
-            idle_seconds=self.config.get("idle_seconds"))
+            idle_seconds=self.config.get("idle_seconds"),
+            record_time=self.config.get("record_time", True))
         self.engine.games = self.games
         self.engine.on_save = lambda: store.save_games(self.engine.games)
         self.window = None

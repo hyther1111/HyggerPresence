@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.3.5 - 2026-10-30
+
+**In short:** a *Record Time* switch on the Detection page freezes every clock —
+session, total, statistics and the timer on the Discord card — and keeps what was
+already recorded. The routes card is no longer hidden when a game has no route
+yet: it shows its name and the `+`, and gains its two time columns with the first
+row. The `+` moved up onto the total line and *Set current time* became a green
+button.
+
+### Added
+- **Record Time (ON/OFF).** A button next to *Presence* turns the clock off
+  everywhere at once. Switching it off banks the stretch that is still running
+  first, so no time is lost; after that the session, the total playtime and
+  `stats.db` stay exactly where they were, and the Discord card publishes without
+  its elapsed timer. Switching it back on lets the session continue from the
+  second it stopped at. The choice is remembered in `config.json`.
+- The state of the button is saved, so the app starts with the clock off if it
+  was left off.
+
+### Changed
+- **The Routes card is always visible on Detection.** With no route yet it shows
+  the *ROUTES* caption, the `+` and the hint; the *Route time* and *Accumulative*
+  captions (and the total number) only appear once the first route is there.
+- **The `+` sits on the total line.** One row fewer: the total strip carries the
+  add button on its left, so the card no longer ends in an empty band.
+- **Set current time is a green button.** The ghost style made it look like a
+  caption; it is now the card's filled action, with a disabled state for when no
+  game is detected.
+- *Presence: ON* and *Record Time: ON* share the same chip and pick black or
+  white text from the theme's green, so the pair reads the same in both themes.
+
+### Fixed
+- A routes card with no rows could hide the whole section, which left the
+  Detection page looking like the feature was missing.
+
 ## 2.3.4 - 2026-10-30
 
 **In short:** route times can be typed two ways. Every route now shows the time
