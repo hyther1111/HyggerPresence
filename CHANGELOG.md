@@ -25,6 +25,10 @@ copies the playtime the app has recorded into the last route.
   is read as the route time and the accumulative column is rebuilt from it, so
   nothing is lost and no `games.json` has to be edited.
 - 2.3.3 was a separate compact build; this release continues from 2.3.2.
+- **The Discord preview looks like the real card.** The big image is rounded and
+  the small one is a 34 px circle that hangs off its corner. The elapsed time
+  reads `2:58:34` once it passes an hour and wears Discord's little gamepad
+  instead of a triangle, and both pick up the theme's text colour.
 
 ## 2.3.2 - 2026-10-28
 

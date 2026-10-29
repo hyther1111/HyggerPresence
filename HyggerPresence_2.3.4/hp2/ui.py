@@ -534,6 +534,43 @@ def paint_moon(size=18, colour="#f2f4f8", hole="#121212"):
     return QIcon(pixmap)
 
 
+def gamepad_pixmap(colour="#b5bac1", size=14, ratio=None):
+    """The little controller Discord puts in front of "Playing a game"."""
+    ratio = ratio or 2.0
+    width = int(round(size * 1.20))
+    canvas = QPixmap(int(round(width * ratio)), int(round(size * ratio)))
+    canvas.setDevicePixelRatio(ratio)
+    canvas.fill(Qt.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(colour))
+    # the two grips first, so the bar joins them into one silhouette
+    painter.drawEllipse(QRectF(1.1, 5.1, 4.6, 6.0))
+    painter.drawEllipse(QRectF(width - 5.7, 5.1, 4.6, 6.0))
+    body = QPainterPath()
+    body.addRoundedRect(QRectF(1.5, 2.3, width - 3.0, 7.2), 3.5, 3.5)
+    painter.drawPath(body)
+    # cut the d-pad and the two buttons out of the solid shape
+    painter.setCompositionMode(QPainter.CompositionMode_Clear)
+    painter.drawRoundedRect(QRectF(3.6, 3.9, 1.2, 4.6), 0.55, 0.55)
+    painter.drawRoundedRect(QRectF(2.3, 5.3, 3.9, 1.2), 0.55, 0.55)
+    painter.drawEllipse(QRectF(width - 5.1, 4.4, 1.4, 1.4))
+    painter.drawEllipse(QRectF(width - 3.5, 6.2, 1.4, 1.4))
+    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+    painter.end()
+    return canvas
+
+
+def elapsed_stamp(seconds):
+    """Discord's elapsed time: 2:58:34 once there is an hour, 12:34 below it."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    if hours:
+        return "%d:%02d:%02d" % (hours, rest // 60, rest % 60)
+    return "%d:%02d" % (rest // 60, rest % 60)
+
+
 # --------------------------------------------------------------------------- title bar
 class SnapPreview(QWidget):
     """Windows-style "drop here to maximise" hint while dragging the title bar."""
@@ -1782,20 +1819,19 @@ class NowPage(Page):
 
         pv_body = QHBoxLayout()
         pv_body.setSpacing(14)
-        self.prev_cover = QLabel("VN")
-        self.prev_cover.setFixedSize(84, 84)
+        # Discord hangs the small image off the bottom-right corner, so the
+        # circle sticks out of the thumbnail's square by a few pixels. A
+        # slightly larger parent gives it room to do that.
+        self.pv_thumb = QWidget()
+        self.pv_thumb.setFixedSize(90, 90)
+        pv_body.addWidget(self.pv_thumb, 0, Qt.AlignTop)
+        self.prev_cover = QLabel("VN", self.pv_thumb)
+        self.prev_cover.setGeometry(0, 0, 84, 84)
         self.prev_cover.setAlignment(Qt.AlignCenter)
-        pv_body.addWidget(self.prev_cover, 0, Qt.AlignTop)
-        # Discord puts the small image in the bottom-right corner of the big
-        # one; the preview does the same so it is clear when one is set.
-        self.prev_small = QLabel(self.prev_cover)
-        self.prev_small.setFixedSize(26, 26)
-        self.prev_small.move(self.prev_cover.width() - 28,
-                            self.prev_cover.height() - 28)
+        self.prev_small = QLabel(self.pv_thumb)
+        self.prev_small.setFixedSize(34, 34)
+        self.prev_small.move(90 - 34, 90 - 34)
         self.prev_small.setAlignment(Qt.AlignCenter)
-        self.prev_small.setStyleSheet(
-            "QLabel{background:#1e1f22;border:2px solid #313338;border-radius:13px;"
-            "color:#b5bac1;font-size:10pt;}")
         self.prev_small.hide()
 
         pv_text = QVBoxLayout()
@@ -1811,13 +1847,24 @@ class NowPage(Page):
         self.prev_state.setObjectName("sub")
         self.prev_state.setWordWrap(False)
         self.prev_timer = QLabel("")
-        self.prev_timer.setStyleSheet("color:#4ade80;")
+        self.prev_timer.setStyleSheet("color:#b5bac1;font-size:8pt;")
+        self.prev_timer_icon = QLabel()
+        self.prev_timer_icon.setFixedSize(16, 14)
+        self.prev_timer_icon.setPixmap(gamepad_pixmap())
+        self.prev_timer_row = QWidget()
+        timer_line = QHBoxLayout(self.prev_timer_row)
+        timer_line.setContentsMargins(0, 0, 0, 0)
+        timer_line.setSpacing(5)
+        timer_line.addWidget(self.prev_timer_icon, 0, Qt.AlignVCenter)
+        timer_line.addWidget(self.prev_timer, 0, Qt.AlignVCenter)
+        timer_line.addStretch(1)
+        self._style_small_badge()
         self.prev_button = QPushButton(tr("View on VNDB"))
         self.prev_button.setObjectName("fakebutton")
         self.prev_button.setFixedWidth(130)
         self.prev_button.clicked.connect(self.open_vndb)
         for widget in (self.prev_title, self.prev_details, self.prev_state,
-                       self.prev_timer, self.prev_button):
+                       self.prev_timer_row, self.prev_button):
             pv_text.addWidget(widget, 0, Qt.AlignLeft)
         pv_text.addStretch(1)
         pv_body.addLayout(pv_text, 1)
@@ -1964,6 +2011,7 @@ class NowPage(Page):
         self.total_label.setText(tr("Total read  %s") % format_time(self.engine.total_seconds))
         self.session_label.setText(tr("Session  %s") % format_time(self.engine.session_seconds))
         self._refresh_routes()
+        self._style_small_badge()
 
         metrics = self.prev_title.fontMetrics()
         width = self._preview_text_width()
@@ -1975,9 +2023,11 @@ class NowPage(Page):
         start = preview.get("start")
         if start:
             elapsed = max(0, int(time.time() - start))
-            self.prev_timer.setText("\u25b6 %d:%02d" % (elapsed // 60, elapsed % 60))
+            self.prev_timer.setText(elapsed_stamp(elapsed))
+            self.prev_timer_row.setVisible(True)
         else:
             self.prev_timer.setText("")
+            self.prev_timer_row.setVisible(False)
         has_vndb = bool(game.get("vndb_id"))
         label = (self.engine.opts or {}).get("button_label") or "View on VNDB"
         if self.prev_button.text() != label:
@@ -2028,13 +2078,27 @@ class NowPage(Page):
         elif self.prev_small.pixmap().isNull():
             self.prev_small.setText("\u25cf")
 
+    def _style_small_badge(self):
+        """The ring around the small image follows the card it sits on."""
+        palette = getattr(self.window, "palette", None) or {}
+        ring = palette.get("surface") or "#1e1f22"
+        subtext = palette.get("subtext") or "#b5bac1"
+        if getattr(self, "_small_badge_ring", None) == (ring, subtext):
+            return
+        self._small_badge_ring = (ring, subtext)
+        self.prev_small.setStyleSheet(
+            "QLabel{background:%s;border:3px solid %s;border-radius:17px;"
+            "color:%s;font-size:10pt;}" % (ring, ring, subtext))
+        self.prev_timer.setStyleSheet("color:%s;font-size:8pt;" % subtext)
+        self.prev_timer_icon.setPixmap(gamepad_pixmap(subtext))
+
     def _apply_small(self, url, image):
         if image is None or getattr(self, "_small_image", None) != url:
             return
         self.prev_small.setText("")
         self.prev_small.setPixmap(rounded_pixmap(
-            scaled_for(image, 26, 26, self.prev_small,
-                       Qt.KeepAspectRatioByExpanding), 13))
+            scaled_for(image, 34, 34, self.prev_small,
+                       Qt.KeepAspectRatioByExpanding), 17))
 
     def _show_engine_error(self):
         error = (self.engine.last_error or "").strip()
@@ -2093,7 +2157,7 @@ class NowPage(Page):
         self.cover.setPixmap(scaled_for(image, 150, 210, self.cover))
         self.prev_cover.setPixmap(rounded_pixmap(
             scaled_for(image, 84, 84, self.prev_cover,
-                       Qt.KeepAspectRatioByExpanding), 8))
+                       Qt.KeepAspectRatioByExpanding), 10))
 
 
 EDGE = 16
