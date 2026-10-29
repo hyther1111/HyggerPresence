@@ -354,9 +354,8 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     /* a route row has no surface of its own: it must blend into the card so no
        darker band is left between the fields */
     QFrame#routerow {{ background: transparent; border: none; }}
-    /* the total strip under the routes: a soft surface, not another input */
-    QFrame#routetotal {{ background: {p['surface2']}; border: 1px solid {p['border']};
-               border-radius: 8px; }}
+    /* the caption line and the total line sit on the card itself, not on a band */
+    QWidget#routeshead, QWidget#routestotal {{ background: transparent; }}
     QLabel#totalvalue {{ color: {p['text']}; font-size: 13px; font-weight: 600; }}
     QPushButton#ghost {{ background: transparent; color: {p['subtext']};
                border: 1px solid {p['border']}; border-radius: 7px; padding: 6px 12px; }}
@@ -1845,12 +1844,6 @@ class NowPage(Page):
         rc = QVBoxLayout(routes_card)
         rc.setContentsMargins(16, 12, 16, 16)
         rc.setSpacing(8)
-        rc_head = QHBoxLayout()
-        rc_caps = QLabel(tr("ROUTES"))
-        rc_caps.setObjectName("caps")
-        rc_head.addWidget(rc_caps)
-        rc_head.addStretch(1)
-        rc.addLayout(rc_head)
         self.routes_editor = RoutesEditor(self, self.engine, None)
         rc.addWidget(self.routes_editor)
         self._routes_card = routes_card
@@ -5514,12 +5507,15 @@ class RoutesEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        # one line for the whole editor: the section name and both column
+        # captions, so the card does not grow a second header row
         self.head = QWidget()
+        self.head.setObjectName("routeshead")
         head = QHBoxLayout(self.head)
         head.setContentsMargins(0, 0, 0, 2)
         head.setSpacing(8)
-        name_head = QLabel(tr("ROUTE"))
-        name_head.setObjectName("caps")
+        title = QLabel(tr("ROUTES"))
+        title.setObjectName("caps")
         route_head = QLabel(tr("ROUTE TIME"))
         route_head.setObjectName("caps")
         route_head.setFixedWidth(124)
@@ -5528,7 +5524,7 @@ class RoutesEditor(QWidget):
         acc_head.setObjectName("caps")
         acc_head.setFixedWidth(124)
         acc_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        head.addWidget(name_head, 1)
+        head.addWidget(title, 1)
         head.addWidget(route_head)
         head.addWidget(acc_head)
         head.addSpacing(49)
@@ -5540,22 +5536,23 @@ class RoutesEditor(QWidget):
         self.rows_box.setAlignment(Qt.AlignTop)
         layout.addLayout(self.rows_box)
 
-        self.total_box = QFrame()
-        self.total_box.setObjectName("routetotal")
-        total_row = QHBoxLayout(self.total_box)
-        total_row.setContentsMargins(12, 9, 12, 9)
-        total_row.setSpacing(8)
+        # the total is a plain line of text under the rows, not another box
+        self.total_row = QWidget()
+        self.total_row.setObjectName("routestotal")
+        total_line = QHBoxLayout(self.total_row)
+        total_line.setContentsMargins(0, 8, 0, 2)
+        total_line.setSpacing(8)
+        total_line.addStretch(1)
         total_caps = QLabel(tr("TOTAL"))
         total_caps.setObjectName("caps")
-        total_row.addWidget(total_caps)
-        total_row.addStretch(1)
+        total_line.addWidget(total_caps)
         self.total_value = QLabel("")
         self.total_value.setObjectName("totalvalue")
         self.total_value.setFixedWidth(124)
         self.total_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        total_row.addWidget(self.total_value)
-        total_row.addSpacing(37)
-        layout.addWidget(self.total_box)
+        total_line.addWidget(self.total_value)
+        total_line.addSpacing(49)
+        layout.addWidget(self.total_row)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -5641,7 +5638,7 @@ class RoutesEditor(QWidget):
         entries = self._entries() if entries is None else entries
         has_rows = bool(entries)
         self.head.setVisible(has_rows)
-        self.total_box.setVisible(has_rows)
+        self.total_row.setVisible(has_rows)
         self.total_value.setText(format_time(entries[-1]["acc"]) if has_rows else "")
         has_game = bool(self.game)
         self.add_button.setEnabled(has_game)
