@@ -51,6 +51,13 @@ Discord preview now matches the card Discord draws.
   once it passes an hour and wears Discord's little gamepad; *Paused* and *Idle*
   restart it from `0:00` the way Discord does, while the *Session* line keeps its
   hours. None of this touches the presence that is actually sent.
+- **The translations cover the whole window again.** Tooltips, the window
+  buttons (minimise / maximise / close) and labels that carry a value, such as
+  the version line or Record Time: ON/OFF, used to stay English; they follow
+  the chosen language now, and switching language updates them straight away.
+- **The preview's hover texts come back on hover.** Hovering the large or the
+  small image shows the text Discord would show; it now appears the moment
+  the mouse is over the image instead of after Qt's tooltip delay.
 - **Save says Saved.** Saving the settings no longer opens a window to dismiss: a
   green *Saved* appears next to the button and fades on its own. The save itself
   is unchanged.

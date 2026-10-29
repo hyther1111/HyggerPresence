@@ -76,6 +76,14 @@ total never goes backwards or skips.
   the timer starts again from `0:00`. The *Session* line keeps its hours, exactly
   like the presence does. Nothing about the real card changed — this only draws
   the preview.
+- **A fully translated window.** Tooltips, the minimise / maximise / close
+  buttons and the labels that carry a number or a state (the version line, the
+  data summary, Record Time: ON/OFF) were still English in the Chinese UI.
+  They follow the language now, and switching language updates them without a
+  restart.
+- **Hover texts again.** Hovering the large or the small image shows the text
+  Discord shows next to it, and it appears as soon as the mouse is on the
+  picture rather than after a pause.
 - **No more odd square behind a cover.** The preview's thumbnail box and the
   cover on a screenshot card painted the window colour behind the image, which
   showed as a darker square around the art. The art now fills its box, and the

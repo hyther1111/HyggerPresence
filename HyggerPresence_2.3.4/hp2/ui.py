@@ -752,9 +752,9 @@ class TitleBar(QWidget):
         row.addWidget(self.theme_button)
 
         for name, kind, handler, object_name, tooltip in (
-                ("minimise", "min", self._window.showMinimized, "winbtn", "Minimise"),
-                ("maximise", "max", self._toggle_max, "winbtn", "Maximise"),
-                ("close", "close", self._window.close, "close", "Close")):
+                ("minimise", "min", self._window.showMinimized, "winbtn", tr("Minimise")),
+                ("maximise", "max", self._toggle_max, "winbtn", tr("Maximise")),
+                ("close", "close", self._window.close, "close", tr("Close"))):
             button = QToolButton()
             button.setObjectName(object_name)
             button.setIcon(paint_caption(kind))
@@ -770,7 +770,7 @@ class TitleBar(QWidget):
     def refresh_caption_icons(self):
         maximised = self._window.isMaximized()
         self.maximise_button.setIcon(paint_caption("restore" if maximised else "max"))
-        self.maximise_button.setToolTip("Restore" if maximised else "Maximise")
+        self.maximise_button.setToolTip(tr("Restore") if maximised else tr("Maximise"))
 
     def set_title_icon(self, icon):
         self.icon_label.setPixmap(icon.pixmap(18, 18))
@@ -1798,6 +1798,29 @@ class LibraryPage(Page):
                                 self.table.viewport().mapToGlobal(pos))
 
 
+class HoverLabel(QLabel):
+    """A label that shows its tooltip as soon as the mouse comes in.
+
+    Qt waits about 700 ms before a tooltip appears and drops it while the window
+    is not active, which made the preview's hover texts look missing on an image
+    that is only a thumbnail tall.
+    """
+
+    def enterEvent(self, event):
+        text = self.toolTip()
+        if text and self.isVisible():
+            from PySide6.QtWidgets import QToolTip
+            QToolTip.showText(self.mapToGlobal(QPoint(self.width() // 2,
+                                                      self.height() + 4)),
+                              text, self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        from PySide6.QtWidgets import QToolTip
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+
 class NowPage(Page):
     """Info on top, then the Discord preview (what friends see)."""
 
@@ -1916,10 +1939,10 @@ class NowPage(Page):
         self.pv_thumb.setObjectName("pvthumb")
         self.pv_thumb.setFixedSize(90, 90)
         pv_body.addWidget(self.pv_thumb, 0, Qt.AlignTop)
-        self.prev_cover = QLabel("VN", self.pv_thumb)
+        self.prev_cover = HoverLabel("VN", self.pv_thumb)
         self.prev_cover.setGeometry(0, 0, 84, 84)
         self.prev_cover.setAlignment(Qt.AlignCenter)
-        self.prev_small = QLabel(self.pv_thumb)
+        self.prev_small = HoverLabel(self.pv_thumb)
         self.prev_small.setFixedSize(34, 34)
         self.prev_small.move(90 - 34, 90 - 34)
         self.prev_small.setAlignment(Qt.AlignCenter)
@@ -2136,7 +2159,7 @@ class NowPage(Page):
             label.setText(metrics.elidedText(text, Qt.ElideRight, width))
         self.refresh_preview_timer()
         has_vndb = bool(game.get("vndb_id"))
-        label = (self.engine.opts or {}).get("button_label") or "View on VNDB"
+        label = (self.engine.opts or {}).get("button_label") or tr("View on VNDB")
         if self.prev_button.text() != label:
             self.prev_button.setText(label)
         self.prev_button.setVisible(has_vndb)
@@ -2203,6 +2226,19 @@ class NowPage(Page):
         self.prev_small.setText("")
         self.prev_small.setPixmap(rounded_pixmap(
             fill_pixmap(image, 34, 34, self.prev_small), 17))
+
+    def retranslate(self):
+        """Re-draw the texts that are built from a format, not a fixed label.
+
+        The chips, the VNDB button and the preview lines are written by
+        update_from_engine with the language that is current at that moment, so
+        a language switch has to force one more pass or they keep the old one.
+        """
+        self._stamp = None
+        try:
+            self.update_from_engine()
+        except Exception:
+            pass
 
     def refresh_preview_timer(self):
         """The green clock under the Discord card.
@@ -4910,9 +4946,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addWidget(QLabel("Large image hover text"))
         self.large_text = QLineEdit(opts.get("large_text", "{title}"))
         layout.addWidget(self.large_text)
-        self._help(layout, "Shown when the pointer rests on the big image. Every "
-                           "variable works here too, for example {title} or "
-                           "{rating_average}.")
+        self._help(layout, tr("Shown when the pointer rests on the big image. Every "
+                              "variable works here too, for example {title} or "
+                              "{rating_average}."))
 
         layout.addSpacing(8)
         layout.addWidget(QLabel("Small image"))
@@ -4930,9 +4966,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addWidget(QLabel("Small image hover text"))
         self.small_text = QLineEdit(opts.get("small_text", ""))
         layout.addWidget(self.small_text)
-        self._help(layout, "Both fields are disabled while the small image is None. "
-                           "The hover text takes the same variables; the preview "
-                           "on Detection shows them when you rest the pointer there.")
+        self._help(layout, tr("Both fields are disabled while the small image is None. "
+                              "The hover text takes the same variables; the preview "
+                              "on Detection shows them when you rest the pointer there."))
 
         layout.addSpacing(8)
         self.show_timer = QCheckBox("Show the elapsed timer while Reading")
@@ -5208,6 +5244,23 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(store.APP_DIR)))
 
     # ------------------------------------------------------------ updates
+    def retranslate(self):
+        """Labels on this page that carry a value, not just a fixed string."""
+        try:
+            self.version_label.setText(
+                "%s %s" % (tr("Current version:"), APP_VERSION))
+        except Exception:
+            pass
+        for name in ("_refresh_data_label", "_refresh_skip_label",
+                     "_refresh_update_notes"):
+            method = getattr(self, name, None)
+            if method is None:
+                continue
+            try:
+                method()
+            except Exception:
+                pass
+
     def _refresh_skip_label(self):
         skipped = self.window.config.get("skip_version") or ""
         self.skip_label.setText(tr("Skipped version: %s")
@@ -7162,6 +7215,17 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         if settings is not None and hasattr(settings, "_retranslate_tabs"):
             try:
                 settings._retranslate_tabs()
+            except Exception:
+                pass
+        if settings is not None and hasattr(settings, "retranslate"):
+            try:
+                settings.retranslate()
+            except Exception:
+                pass
+        now = getattr(self, "now_page", None)
+        if now is not None and hasattr(now, "retranslate"):
+            try:
+                now.retranslate()
             except Exception:
                 pass
         for name in ("shots_page", "stats_page"):

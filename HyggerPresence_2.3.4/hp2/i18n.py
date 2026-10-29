@@ -127,6 +127,14 @@ def register_tree(root):
             text = None
         if text and text in sources:
             record(["text", child, text])
+        # tooltips are user visible too: without this every hover text stayed
+        # English no matter which language was chosen
+        try:
+            tip = child.toolTip()
+        except Exception:
+            tip = ""
+        if tip and tip in sources:
+            record(["tip", child, tip])
     for tabs in root.findChildren(QTabWidget):
         for index in range(tabs.count()):
             caption = tabs.tabText(index)
@@ -220,6 +228,8 @@ def apply_language(code, root=None):
                 combo.setCurrentIndex(current)
             elif kind == "action":
                 entry[1].setText(tr(entry[2]))
+            elif kind == "tip":
+                entry[1].setToolTip(tr(entry[2]))
             elif kind == "hint":
                 entry[1].setPlaceholderText(tr(entry[2]))
             elif kind == "header":
