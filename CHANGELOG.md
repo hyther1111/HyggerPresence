@@ -1,23 +1,34 @@
 # Changelog
 
-## 2.3.5 - 2026-10-30
+## 2.3.4 - 2026-10-30
 
-**In short:** a *Record Time* switch on the Detection page freezes every clock —
-session, total, statistics and the timer on the Discord card — and keeps what was
-already recorded. The routes card is no longer hidden when a game has no route
-yet: it shows its name and the `+`, and gains its two time columns with the first
-row. The `+` moved up onto the total line, and *Set current time* is now the blue
-action of the card and only shows up once there is a route to fill in.
+**In short:** route times can be typed two ways. Every route shows the time spent
+in it and the playtime reached when it ends; typing either one fills the other
+in, a total strip repeats the last number, and one button copies the playtime the
+app has recorded into the last route. A second switch, *Record Time*, stops every
+clock, the routes card is no longer hidden when a game has no route yet, and the
+Discord preview now matches the card Discord draws.
 
 ### Added
 - **Record Time (ON/OFF).** A button next to *Presence* turns the clock off
-  everywhere at once. Switching it off banks the stretch that is still running
-  first, so no time is lost; after that the session, the total playtime and
-  `stats.db` stay exactly where they were, and the Discord card publishes without
-  its elapsed timer. Switching it back on lets the session continue from the
-  second it stopped at. The choice is remembered in `config.json`.
-- The state of the button is saved, so the app starts with the clock off if it
-  was left off.
+  everywhere at once: the session, the total playtime, the rows written to
+  `stats.db` and the timer on the Discord card. Switching it off banks the
+  stretch that is still running first, so no time is lost; after that the session
+  and the total stay exactly where they were, and the card publishes without its
+  elapsed timer. Switching it back on lets the session continue from the second
+  it stopped at. The choice is remembered in `config.json`, so the app starts
+  with the clock off if it was left off.
+- **Route time and accumulative time.** The Routes editor (on Detection and in
+  the game editor) has two columns: the time spent in that route and the total
+  playtime when the route ends. Type either one and the other follows — the
+  route time is the difference to the route above, the accumulative time is the
+  running total. Rows below are renumbered, so a change in the middle never
+  leaves a broken total.
+- **A total strip under the routes.** It repeats the accumulative time of the
+  last route, right-aligned under its column, so the number you care about is
+  not buried in the last row.
+- **Set current time.** One button fills the last route with the playtime the
+  app has recorded so far. It asks first, because it overwrites a typed value.
 
 ### Changed
 - **The Routes card is always visible on Detection.** With no route yet it shows
@@ -31,20 +42,35 @@ action of the card and only shows up once there is a route to fill in.
 - **Messages stay on the action row.** "The recorded total is not larger than the
   route above" and the other hints share the line with the button, so an error
   never pushes the card taller.
-- *Record Time: OFF* is red, like *Presence: OFF*, instead of a grey chip that
-  read as disabled.
-- *Presence: ON* and *Record Time: ON* share the same chip and pick black or
-  white text from the theme's green, so the pair reads the same in both themes.
+- *Record Time: OFF* is red, like *Presence: OFF*, and both switches print white
+  in either theme, so the pair reads the same in the dark and the light palette.
+- **The Discord preview looks like the real card.** The big image is rounded on
+  all four corners and the small one is a 34 px circle that hangs off its corner.
+  The thumbnail is cropped from the full cover at the screen's pixel ratio, so it
+  is no longer stretched up from a fitted image. The elapsed time reads `2:58:34`
+  once it passes an hour and wears Discord's little gamepad; *Paused* and *Idle*
+  restart it from `0:00` the way Discord does, while the *Session* line keeps its
+  hours. None of this touches the presence that is actually sent.
+- **Save says Saved.** Saving the settings no longer opens a window to dismiss: a
+  green *Saved* appears next to the button and fades on its own. The save itself
+  is unchanged.
+- Route lists saved by older versions only had one number per route. That value
+  is read as the route time and the accumulative column is rebuilt from it, so
+  nothing is lost and no `games.json` has to be edited.
+- 2.3.3 was a separate compact build; this release continues from 2.3.2.
 
 ### Fixed
+- **No more odd-coloured square behind a cover.** The preview's thumbnail box and
+  the cover of a screenshot card painted the window colour behind the image,
+  which showed as a darker square around the art (and as bars beside a cover that
+  was not exactly square). The art now fills the whole box, so only the card's own
+  background shows around it.
+- **Only one rounded corner on the preview thumbnail.** The clip path and the
+  image were built in different coordinate systems whenever the screen scaled by
+  125 % or 150 %, which rounded the top left corner and left the other three
+  square.
 - A routes card with no rows could hide the whole section, which left the
   Detection page looking like the feature was missing.
-- **No more odd-coloured square behind a cover.** The Discord preview's thumbnail
-  box and the cover of a screenshot card painted the window colour behind the
-  image, which showed as a darker square around the art (and as bars beside a
-  cover that was not exactly square). The art now fills the whole box: the
-  preview cover is cropped to 84×84 and the gallery covers are fitted, both with
-  rounded corners.
 
 ## 2.3.4 - 2026-10-30
 

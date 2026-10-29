@@ -4,7 +4,7 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.5** — a *Record Time* switch on the Detection page turns
+Current release: **2.3.4** — a *Record Time* switch on the Detection page turns
 every clock off in one go: the session, the total, the statistics and the timer
 on the Discord card all stop, and whatever was already recorded is kept. The
 routes card also stays on screen as soon as a game is seen, with just its name
@@ -90,7 +90,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.5
+cd HyggerPresence/HyggerPresence_2.3.4
 pip install -r requirements.txt
 python main.py
 ```
@@ -123,7 +123,7 @@ needed to reproduce it:
 
 ```bat
 python -m venv buildenv
-buildenv\Scripts\pip install -r HyggerPresence_2.3.5\requirements.txt pyinstaller
+buildenv\Scripts\pip install -r HyggerPresence_2.3.4\requirements.txt pyinstaller
 buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
 ```
 
@@ -303,7 +303,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.5/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.4/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log

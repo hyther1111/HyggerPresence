@@ -585,13 +585,17 @@ def square_pixmap(pixmap, size):
     return cropped
 
 
-def fill_pixmap(pixmap, width, height):
+def fill_pixmap(pixmap, width, height, widget=None):
     """Scale a pixmap so it covers ``width x height``, then crop the middle.
 
     Discord paints the large image as a square thumbnail and the screenshot
     cards paint their art edge to edge, so a portrait cover that is merely
     fitted leaves strips of the widget's own background down the sides - the
     "off colour box" that showed up around covers.
+
+    ``widget`` gives the pixel ratio to render at. Scaling to the plain logical
+    size first and letting the screen stretch the result was what made the
+    Discord thumbnail look soft on a 125 % or 150 % display.
     """
     if pixmap is None:
         return pixmap
@@ -599,7 +603,13 @@ def fill_pixmap(pixmap, width, height):
         pixmap = QPixmap.fromImage(pixmap)
     if pixmap.isNull():
         return pixmap
-    ratio = pixmap.devicePixelRatio() or 1.0
+    if widget is not None:
+        try:
+            ratio = max(1.0, float(widget.devicePixelRatioF()))
+        except Exception:
+            ratio = 1.0
+    else:
+        ratio = pixmap.devicePixelRatio() or 1.0
     pixels_w = max(1, int(round(width * ratio)))
     pixels_h = max(1, int(round(height * ratio)))
     scaled = pixmap.scaled(pixels_w, pixels_h, Qt.KeepAspectRatioByExpanding,
@@ -899,25 +909,30 @@ def rounded_pixmap(pixmap, radius):
     if radius <= 0:
         return pixmap
     ratio = pixmap.devicePixelRatio() or 1.0
+    width = pixmap.width()
+    height = pixmap.height()
+    # Paint in device pixels on a 1:1 painter. A painter that already scales by
+    # the pixel ratio put the clip path and the image in different coordinate
+    # systems, so only the top left corner came out rounded.
+    box = QRectF(0, 0, width, height)
     path = QPainterPath()
-    box = QRectF(pixmap.rect())
-    # A radius of half the shorter side is a circle; Qt draws that as a square
-    # when it is handed a rounded rect, so ask for an ellipse in that case.
-    short = min(box.width(), box.height())
-    if radius * ratio * 2 >= short - 0.01:
-        path.addEllipse(box)
+    pixels = radius * ratio
+    if pixels * 2 >= min(width, height) - 0.01:
+        path.addEllipse(box)          # a circle, not a rounded square
     else:
-        path.addRoundedRect(box, radius * ratio, radius * ratio)
+        path.addRoundedRect(box, pixels, pixels)
     # The result needs a real alpha channel: QPixmap.fill(Qt.transparent) on a
     # plain pixmap turns black on Windows instead of transparent.
-    result = QImage(pixmap.size(), QImage.Format_ARGB32_Premultiplied)
-    result.setDevicePixelRatio(ratio)
+    result = QImage(width, height, QImage.Format_ARGB32_Premultiplied)
     result.fill(Qt.transparent)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
     painter.setClipPath(path)
-    painter.drawPixmap(0, 0, pixmap)
+    painter.drawPixmap(box, pixmap, QRectF(0, 0, width, height))
     painter.end()
+    # only now: the ratio is for the screen, not for the painter above
+    result.setDevicePixelRatio(ratio)
     return QPixmap.fromImage(result)
 
 
@@ -1788,6 +1803,10 @@ class NowPage(Page):
 
     def __init__(self, window):
         super().__init__(window)
+        # the preview clock restarts on every Paused/Idle switch; these two keep
+        # the state it started for
+        self._state_key = None
+        self._state_at = 0.0
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
         outer.setSpacing(12)
@@ -2053,16 +2072,14 @@ class NowPage(Page):
         self.presence_button.setStyleSheet(
             "QPushButton{background:%s;color:%s;border:none;border-radius:7px;"
             "padding:7px 14px;font-weight:600;}"
-            % (theme["green"] if enabled else theme["red"],
-               ink_on(theme["green"]) if enabled else "#ffffff"))
+            % (theme["green"] if enabled else theme["red"], "#ffffff"))
         recorded = bool(getattr(self.engine, "record_time", True))
         self.record_button.setText(
             tr("Record Time: ON") if recorded else tr("Record Time: OFF"))
         self.record_button.setStyleSheet(
             "QPushButton{background:%s;color:%s;border:none;border-radius:7px;"
             "padding:7px 14px;font-weight:600;}"
-            % (theme["green"] if recorded else theme["red"],
-               ink_on(theme["green"]) if recorded else "#ffffff"))
+            % (theme["green"] if recorded else theme["red"], "#ffffff"))
         preview = self.engine.preview or {}
         if not preview:
             self.title_label.setText(tr("No game yet"))
@@ -2117,14 +2134,7 @@ class NowPage(Page):
                            (self.prev_state, "state")):
             text = preview.get(key) or ""
             label.setText(metrics.elidedText(text, Qt.ElideRight, width))
-        start = preview.get("start")
-        if start:
-            elapsed = max(0, int(time.time() - start))
-            self.prev_timer.setText(elapsed_stamp(elapsed))
-            self.prev_timer_row.setVisible(True)
-        else:
-            self.prev_timer.setText("")
-            self.prev_timer_row.setVisible(False)
+        self.refresh_preview_timer()
         has_vndb = bool(game.get("vndb_id"))
         label = (self.engine.opts or {}).get("button_label") or "View on VNDB"
         if self.prev_button.text() != label:
@@ -2191,8 +2201,43 @@ class NowPage(Page):
         if image is None or getattr(self, "_small_image", None) != url:
             return
         self.prev_small.setText("")
-        square = square_pixmap(image, 34)
-        self.prev_small.setPixmap(rounded_pixmap(square, 17))
+        self.prev_small.setPixmap(rounded_pixmap(
+            fill_pixmap(image, 34, 34, self.prev_small), 17))
+
+    def refresh_preview_timer(self):
+        """The green clock under the Discord card.
+
+        Reading counts from the moment the session started, exactly like the
+        presence does. Paused and Idle are different: Discord restarts the
+        clock every time the state flips, so the preview starts a fresh count
+        at 0:00 on each switch. The session and total lines are untouched -
+        this only draws the preview.
+        """
+        preview = self.engine.preview or {}
+        game = self.engine.game
+        if not preview or not game or not getattr(self.engine, "record_time", True):
+            self._state_key = None
+            self.prev_timer.setText("")
+            self.prev_timer_row.setVisible(False)
+            return
+        status = preview.get("status") or ""
+        start = preview.get("start")
+        if start:
+            self._state_key = None
+            elapsed = max(0, int(time.time() - start))
+        elif status in ("Paused", "Idle"):
+            key = (game.get("exe") or game.get("title") or "", status)
+            if self._state_key != key or not self._state_at:
+                self._state_key = key
+                self._state_at = time.time()
+            elapsed = max(0, int(time.time() - self._state_at))
+        else:
+            self._state_key = None
+            self.prev_timer.setText("")
+            self.prev_timer_row.setVisible(False)
+            return
+        self.prev_timer.setText(elapsed_stamp(elapsed))
+        self.prev_timer_row.setVisible(True)
 
     def _show_engine_error(self):
         error = (self.engine.last_error or "").strip()
@@ -2251,7 +2296,7 @@ class NowPage(Page):
         self.cover.setPixmap(scaled_for(image, 150, 210, self.cover))
         # the Discord thumbnail is a square, so crop the portrait cover into it
         self.prev_cover.setPixmap(rounded_pixmap(
-            fill_pixmap(scaled_for(image, 84, 84, self.prev_cover), 84, 84), 10))
+            fill_pixmap(image, 84, 84, self.prev_cover), 6))
 
 
 EDGE = 16
@@ -2278,7 +2323,7 @@ def menu_qss(window):
     values = dict(getattr(window, "palette", None) or {})
     values.setdefault("menuarrow", menu_arrow_icon_path())
     return MENU_QSS % values
-APP_VERSION = "2.3.5"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.3.4"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -3547,7 +3592,8 @@ class ScreenshotPage(Page):
             try:
                 pixmap = self._cached_thumb(path, self.THUMB)
                 if not pixmap.isNull() and label is not None:
-                    label.setPixmap(rounded_pixmap(fill_pixmap(pixmap, *self.THUMB), 6))
+                    label.setPixmap(rounded_pixmap(
+                        fill_pixmap(pixmap, *self.THUMB, widget=label), 6))
             except RuntimeError:
                 pass
 
@@ -3999,7 +4045,8 @@ class ScreenshotPage(Page):
         art.setStyleSheet("QLabel{background:transparent;border-radius:6px;}")
         cover = self._cover_for(folder)
         if cover is not None:
-            art.setPixmap(rounded_pixmap(fill_pixmap(cover, *self.COVER), 6))
+            art.setPixmap(rounded_pixmap(
+                fill_pixmap(cover, *self.COVER, widget=art), 6))
         lay.addWidget(art, 0, Qt.AlignHCenter)
         name = QLabel(self._library_title(folder))
         name.setObjectName("h3")
@@ -4034,7 +4081,8 @@ class ScreenshotPage(Page):
         else:
             pixmap = self._cached_thumb(path, self.THUMB)
             if not pixmap.isNull():
-                art.setPixmap(rounded_pixmap(fill_pixmap(pixmap, *self.THUMB), 6))
+                art.setPixmap(rounded_pixmap(
+                    fill_pixmap(pixmap, *self.THUMB, widget=art), 6))
         lay.addWidget(art, 0, Qt.AlignHCenter)
         name = QLabel(path.name)
         name.setObjectName("sub")
@@ -4412,7 +4460,14 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         save.setObjectName("primary")
         save.clicked.connect(self.save)
         buttons.addWidget(save)
+        # "Saved" sits next to the button instead of a second window to dismiss
+        self.saved_label = QLabel("")
+        self.saved_label.setObjectName("saved")
+        buttons.addWidget(self.saved_label)
         buttons.addStretch(1)
+        self._saved_timer = QTimer(self)
+        self._saved_timer.setSingleShot(True)
+        self._saved_timer.timeout.connect(self._clear_saved)
         self.version = QLabel("")
         self.version.setObjectName("sub")
         self.version.hide()
@@ -4760,6 +4815,18 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self._startup_label_loaded = True
             # one PowerShell call, only the first time the page is opened
             QTimer.singleShot(0, self._refresh_startup_label)
+
+    def _flash_saved(self):
+        """Say Saved next to the button, then fade out on its own."""
+        self.saved_label.setText(tr("Saved"))
+        theme = getattr(self.window, "palette", None) or {}
+        self.saved_label.setStyleSheet(
+            "QLabel#saved{color:%s;font-weight:600;padding-left:2px;}"
+            % (theme.get("green") or "#16a34a"))
+        self._saved_timer.start(2500)
+
+    def _clear_saved(self):
+        self.saved_label.setText("")
 
     def _refresh_startup_label(self):
         """Show where the Startup shortcut points, so a stale one is obvious."""
@@ -5443,7 +5510,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
                        "or add Hygger Presence to shell:startup yourself."))
         self._refresh_startup_label()
         self._refresh_data_label()
-        QMessageBox.information(self, tr("Settings"), tr("Saved."))
+        self._flash_saved()
 
 
 class HotkeyDialog(QDialog):
@@ -7647,9 +7714,14 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         engine = self.engine
         if not self.now_page.isVisible():
             return
-        if engine.game is None or engine._reading_start is None:
+        if engine.game is None:
             return
         if engine.status != "Reading":
+            # the preview's own clock (paused/idle) still ticks; the session and
+            # the total stay where the engine left them
+            self.now_page.refresh_preview_timer()
+            return
+        if engine._reading_start is None:
             return
         current = max(0.0, time.time() - engine._reading_start)
         engine.session_seconds = engine._session_accumulated + current
