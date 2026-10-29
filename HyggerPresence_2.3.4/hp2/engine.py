@@ -891,12 +891,25 @@ class Engine(DetectorMixin):
             debug_log("games save failed: %s" % error)
 
     def routes(self, game):
-        """The game's routes as plain dicts, for the tables in the UI."""
+        """The game's routes as plain dicts, for the tables in the UI.
+
+        Every entry carries the time spent in that route ("seconds") and the
+        playtime reached when the route ends ("acc"). Old games.json files only
+        know "seconds", so the running total is rebuilt from them on the fly.
+        """
         if not game:
             return []
-        return [{"name": entry.get("name") or "",
-                 "seconds": float(entry.get("seconds") or 0.0)}
-                for entry in self._routes(game) if (entry.get("name") or "").strip()]
+        rows = []
+        acc = 0.0
+        for entry in self._routes(game):
+            name = (entry.get("name") or "").strip()
+            if not name:
+                continue
+            seconds = max(0.0, float(entry.get("seconds") or 0.0))
+            stored = entry.get("acc_seconds")
+            acc = max(acc, float(stored)) if stored is not None else acc + seconds
+            rows.append({"name": name, "seconds": seconds, "acc": acc})
+        return rows
 
     def route_names(self, game):
         return [entry["name"] for entry in self.routes(game)]
@@ -908,19 +921,25 @@ class Engine(DetectorMixin):
         return float((entry or {}).get("seconds") or 0.0)
 
     def route_total(self, game):
-        return sum(entry["seconds"] for entry in self.routes(game))
+        rows = self.routes(game)
+        return rows[-1]["acc"] if rows else 0.0
 
-    def add_route(self, game, name, seconds=0.0):
+    def add_route(self, game, name, seconds=0.0, acc=None):
         name = (name or "").strip()
         if not game or not name or self._route_entry(game, name) is not None:
             return False
+        rows = self.routes(game)
+        seconds = max(0.0, float(seconds or 0.0))
+        if acc is None:
+            acc = (rows[-1]["acc"] if rows else 0.0) + seconds
         entry = self._route_entry(game, name, create=True)
-        entry["seconds"] = max(0.0, float(seconds or 0.0))
+        entry["seconds"] = seconds
+        entry["acc_seconds"] = max(0.0, float(acc))
         self.save_games_now()
         return True
 
-    def rename_route(self, game, old, new, seconds=None):
-        """Rename a route and set its time in one step (Edit uses both)."""
+    def rename_route(self, game, old, new, seconds=None, acc=None):
+        """Rename a route and set its times in one step (Edit uses both)."""
         old, new = (old or "").strip(), (new or "").strip()
         if not game or not old or not new:
             return False
@@ -932,6 +951,38 @@ class Engine(DetectorMixin):
         entry["name"] = new
         if seconds is not None:
             entry["seconds"] = max(0.0, float(seconds))
+        if acc is not None:
+            entry["acc_seconds"] = max(0.0, float(acc))
+        self.save_games_now()
+        return True
+
+    def set_all_routes(self, game, rows):
+        """Rewrite the whole route list, in display order.
+
+        rows is [(name, seconds, acc)]. The editor hands its rows over after
+        every edit, so the running total stays consistent even when a route in
+        the middle changes.
+        """
+        if not game:
+            return False
+        entries = self._routes(game)
+        by_name = {(entry.get("name") or ""): entry for entry in entries}
+        wanted = []
+        for name, seconds, acc in rows:
+            name = (name or "").strip()
+            if not name:
+                continue
+            if any(other["name"] == name for other in wanted):
+                return False
+            entry = by_name.get(name)
+            if entry is None:
+                entry = {"name": name}
+                by_name[name] = entry
+            entry["name"] = name
+            entry["seconds"] = max(0.0, float(seconds or 0.0))
+            entry["acc_seconds"] = max(0.0, float(acc or 0.0))
+            wanted.append(entry)
+        entries[:] = wanted
         self.save_games_now()
         return True
 

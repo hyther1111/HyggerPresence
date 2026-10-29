@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.3.4 - 2026-10-30
+
+**In short:** route times can be typed two ways. Every route now shows the time
+spent in it and the playtime reached when it ends; typing either one fills the
+other in, a total strip under the list repeats the last number, and one button
+copies the playtime the app has recorded into the last route.
+
+### Added
+- **Route time and accumulative time.** The Routes editor (on Detection and in
+  the game editor) has two columns: the time spent in that route and the total
+  playtime when the route ends. Type either one and the other follows — the
+  route time is the difference to the route above, the accumulative time is the
+  running total. Rows below are renumbered, so a change in the middle never
+  leaves a broken total.
+- **A total strip under the routes.** It repeats the accumulative time of the
+  last route, right-aligned under its column, so the number you care about is
+  not buried in the last row.
+- **Set current time.** One button fills the last route with the playtime the
+  app has recorded so far. It asks first, because it overwrites a typed value.
+
+### Changed
+- Route lists saved by older versions only had one number per route. That value
+  is read as the route time and the accumulative column is rebuilt from it, so
+  nothing is lost and no `games.json` has to be edited.
+- 2.3.3 was a separate compact build; this release continues from 2.3.2.
+
 ## 2.3.2 - 2026-10-28
 
 **In short:** a bug-fix release. VNDB ratings come back on the 0–10 scale,

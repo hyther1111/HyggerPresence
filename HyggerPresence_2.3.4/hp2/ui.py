@@ -354,6 +354,15 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     /* a route row has no surface of its own: it must blend into the card so no
        darker band is left between the fields */
     QFrame#routerow {{ background: transparent; border: none; }}
+    /* the total strip under the routes: a soft surface, not another input */
+    QFrame#routetotal {{ background: {p['surface2']}; border: 1px solid {p['border']};
+               border-radius: 8px; }}
+    QLabel#totalvalue {{ color: {p['text']}; font-size: 13px; font-weight: 600; }}
+    QPushButton#ghost {{ background: transparent; color: {p['subtext']};
+               border: 1px solid {p['border']}; border-radius: 7px; padding: 6px 12px; }}
+    QPushButton#ghost:hover {{ border-color: {p['accent']}; color: {p['text']}; }}
+    QPushButton#ghost:pressed {{ background: {p['border']}; }}
+    QPushButton#ghost:disabled {{ color: {p['border']}; border-color: {p['border']}; }}
     QPushButton#segment {{ background: {p['surface2']}; color: {p['subtext']};
         border: 1px solid {p['border']}; border-radius: 8px; padding: 8px 20px; }}
     QPushButton#segment:hover {{ border-color: {p['accent']}; color: {p['text']}; }}
@@ -2118,7 +2127,7 @@ def menu_qss(window):
     values = dict(getattr(window, "palette", None) or {})
     values.setdefault("menuarrow", menu_arrow_icon_path())
     return MENU_QSS % values
-APP_VERSION = "2.3.2"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.3.4"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -5428,45 +5437,69 @@ def parse_route_time(text):
 
 
 class RouteRow(QFrame):
-    """One route: its name, its typed time, and a red bin."""
+    """One route: its name, the time spent in it and the total so far."""
 
-    def __init__(self, editor, name="", seconds=0.0):
+    def __init__(self, editor, name="", seconds=0.0, acc=0.0):
         super().__init__()
         from .core import format_time
         self.editor = editor
         self.original = name
+        self._last_edited = "route"
         self.setObjectName("routerow")
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         self.name_field = QLineEdit(name)
         self.name_field.setPlaceholderText(tr("Route name"))
-        self.name_field.setMinimumHeight(28)
-        self.time_field = QLineEdit(format_time(seconds) if seconds else "")
-        self.time_field.setPlaceholderText(tr("Time, e.g. 1h 30m"))
-        self.time_field.setFixedWidth(160)
-        self.time_field.setMinimumHeight(28)
+        self.name_field.setMinimumHeight(30)
+        self.route_field = QLineEdit(format_time(seconds) if seconds else "")
+        self.route_field.setPlaceholderText("0s")
+        self.route_field.setFixedWidth(124)
+        self.route_field.setMinimumHeight(30)
+        self.route_field.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.route_field.setToolTip(tr("Time spent in this route"))
+        self.acc_field = QLineEdit(format_time(acc) if acc else "")
+        self.acc_field.setPlaceholderText("0s")
+        self.acc_field.setFixedWidth(124)
+        self.acc_field.setMinimumHeight(30)
+        self.acc_field.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.acc_field.setToolTip(tr("Total playtime when this route ends"))
         self.bin_button = QToolButton()
         self.bin_button.setObjectName("bin")
         self.bin_button.setIcon(QIcon(trash_pixmap()))
         self.bin_button.setIconSize(QSize(16, 16))
         self.bin_button.setToolTip(tr("Remove this route"))
         self.bin_button.setCursor(Qt.PointingHandCursor)
-        self.bin_button.setFixedSize(32, 28)
+        self.bin_button.setFixedSize(32, 30)
         row.addWidget(self.name_field, 1)
-        row.addWidget(self.time_field)
+        row.addWidget(self.route_field)
+        row.addWidget(self.acc_field)
         row.addWidget(self.bin_button)
-        self.name_field.editingFinished.connect(lambda: editor.commit_row(self))
-        self.time_field.editingFinished.connect(lambda: editor.commit_row(self))
+        self.route_field.textEdited.connect(lambda *_: self._mark("route"))
+        self.acc_field.textEdited.connect(lambda *_: self._mark("acc"))
+        for field in (self.name_field, self.route_field, self.acc_field):
+            field.editingFinished.connect(lambda row=self: editor.commit_row(row))
         self.bin_button.clicked.connect(lambda: editor.remove_row(self))
+
+    def _mark(self, which):
+        self._last_edited = which
+
+    def set_times(self, seconds, acc):
+        from .core import format_time
+        if not self.route_field.hasFocus():
+            self.route_field.setText(format_time(seconds) if seconds else "")
+        if not self.acc_field.hasFocus():
+            self.acc_field.setText(format_time(acc) if acc else "")
 
 
 class RoutesEditor(QWidget):
-    """Routes of one game: a + button, then one editable row per route.
+    """Routes of one game: the time in the route and the total so far.
 
-    Nothing is shown until + is pressed. Times are typed by hand and saved on
-    focus-out; the app never guesses where a chapter ends and nothing here
-    touches the session clock, statistics or Discord.
+    Typing either number fills the other in: the route time is what remains
+    after the route above, the accumulative time is the playtime reached when
+    the route ends. Times are typed by hand and saved on focus-out; the app
+    never guesses where a chapter ends and nothing here touches the session
+    clock, statistics or Discord.
     """
 
     def __init__(self, parent, engine, game, on_change=None):
@@ -5475,10 +5508,31 @@ class RoutesEditor(QWidget):
         self.game = game
         self.on_change = on_change
         self.rows = []
+        self._updating = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.head = QWidget()
+        head = QHBoxLayout(self.head)
+        head.setContentsMargins(0, 0, 0, 2)
+        head.setSpacing(8)
+        name_head = QLabel(tr("ROUTE"))
+        name_head.setObjectName("caps")
+        route_head = QLabel(tr("ROUTE TIME"))
+        route_head.setObjectName("caps")
+        route_head.setFixedWidth(124)
+        route_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        acc_head = QLabel(tr("ACCUMULATIVE"))
+        acc_head.setObjectName("caps")
+        acc_head.setFixedWidth(124)
+        acc_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        head.addWidget(name_head, 1)
+        head.addWidget(route_head)
+        head.addWidget(acc_head)
+        head.addSpacing(49)
+        layout.addWidget(self.head)
 
         self.rows_box = QVBoxLayout()
         self.rows_box.setContentsMargins(0, 0, 0, 0)
@@ -5486,22 +5540,46 @@ class RoutesEditor(QWidget):
         self.rows_box.setAlignment(Qt.AlignTop)
         layout.addLayout(self.rows_box)
 
-        foot = QHBoxLayout()
-        foot.setSpacing(8)
+        self.total_box = QFrame()
+        self.total_box.setObjectName("routetotal")
+        total_row = QHBoxLayout(self.total_box)
+        total_row.setContentsMargins(12, 9, 12, 9)
+        total_row.setSpacing(8)
+        total_caps = QLabel(tr("TOTAL"))
+        total_caps.setObjectName("caps")
+        total_row.addWidget(total_caps)
+        total_row.addStretch(1)
+        self.total_value = QLabel("")
+        self.total_value.setObjectName("totalvalue")
+        self.total_value.setFixedWidth(124)
+        self.total_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        total_row.addWidget(self.total_value)
+        total_row.addSpacing(37)
+        layout.addWidget(self.total_box)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
         self.add_button = QToolButton()
         self.add_button.setObjectName("add")
         self.add_button.setText("+")
         self.add_button.setToolTip(tr("Add a route"))
         self.add_button.setCursor(Qt.PointingHandCursor)
-        self.add_button.setFixedSize(32, 28)
+        self.add_button.setFixedSize(32, 30)
         self.add_button.clicked.connect(self.add_row)
-        foot.addWidget(self.add_button, 0, Qt.AlignLeft)
+        actions.addWidget(self.add_button, 0, Qt.AlignLeft)
+        actions.addStretch(1)
+        self.set_button = QPushButton(tr("Set current time"))
+        self.set_button.setObjectName("ghost")
+        self.set_button.setCursor(Qt.PointingHandCursor)
+        self.set_button.setToolTip(tr("Use the playtime the app has recorded so far"))
+        self.set_button.clicked.connect(self.set_current)
+        actions.addWidget(self.set_button)
+        layout.addLayout(actions)
+
         self.hint = QLabel(tr("Add the routes you have finished and the time you spent in each."))
         self.hint.setObjectName("help")
         self.hint.setWordWrap(True)
-        foot.addWidget(self.hint, 1)
-        foot.addStretch(0)
-        layout.addLayout(foot)
+        layout.addWidget(self.hint)
         # everything stays at the top; the card grows with its rows instead of
         # leaving the + stranded at the bottom of an empty box
         layout.addStretch(1)
@@ -5519,7 +5597,7 @@ class RoutesEditor(QWidget):
     def _editing(self):
         focused = QApplication.focusWidget()
         for row in self.rows:
-            if focused in (row.name_field, row.time_field):
+            if focused in (row.name_field, row.route_field, row.acc_field):
                 return True
         return False
 
@@ -5528,30 +5606,46 @@ class RoutesEditor(QWidget):
 
     def refresh(self, force=False):
         from .core import format_time
+        if self._updating:
+            return
         if not force and self._editing():
             return
+        try:
+            self._refresh(force)
+        except RuntimeError:
+            # a field still had focus while its page was being torn down (the
+            # dialog closes right after typing); the widgets are already gone
+            return
+
+    def _refresh(self, force=False):
         entries = self._entries()
         current = [row.original for row in self.rows if row.original]
         wanted = [entry["name"] for entry in entries]
         if current != wanted or force:
+            # rebuild in the stored order: reusing a row that happens to share a
+            # name (a rename, a reordered list) would leave the two columns of a
+            # different route in place
             for row in list(self.rows):
-                if not row.original or row.original not in wanted:
-                    self.rows.remove(row)
-                    row.setParent(None)
-                    row.deleteLater()
+                self.rows.remove(row)
+                row.setParent(None)
+                row.deleteLater()
             for entry in entries:
-                if entry["name"] in [row.original for row in self.rows]:
-                    continue
-                self._append_row(entry["name"], entry["seconds"])
+                self._append_row(entry["name"], entry["seconds"], entry["acc"])
             self._resync()
-        else:
-            by_name = {entry["name"]: entry["seconds"] for entry in entries}
-            for row in self.rows:
-                if row.original and not row.time_field.hasFocus():
-                    seconds = by_name.get(row.original, 0.0)
-                    row.time_field.setText(format_time(seconds) if seconds else "")
+        for entry, row in zip(entries, self.rows):
+            row.set_times(entry["seconds"], entry["acc"])
+        self._sync_footer(entries)
+
+    def _sync_footer(self, entries=None):
+        from .core import format_time
+        entries = self._entries() if entries is None else entries
+        has_rows = bool(entries)
+        self.head.setVisible(has_rows)
+        self.total_box.setVisible(has_rows)
+        self.total_value.setText(format_time(entries[-1]["acc"]) if has_rows else "")
         has_game = bool(self.game)
         self.add_button.setEnabled(has_game)
+        self.set_button.setEnabled(has_game and has_rows)
         self.hint.setVisible(not self.rows)
 
     def _resync(self):
@@ -5562,8 +5656,8 @@ class RoutesEditor(QWidget):
             self.rows_box.addWidget(row)
         self.rows_box.activate()
 
-    def _append_row(self, name="", seconds=0.0):
-        row = RouteRow(self, name, seconds)
+    def _append_row(self, name="", seconds=0.0, acc=0.0):
+        row = RouteRow(self, name, seconds, acc)
         self.rows.append(row)
         self.rows_box.addWidget(row)
         return row
@@ -5575,41 +5669,90 @@ class RoutesEditor(QWidget):
         if any(not row.original for row in self.rows):
             self.rows[-1].name_field.setFocus()
             return
-        row = self._append_row()
+        entries = self._entries()
+        row = self._append_row("", 0.0, entries[-1]["acc"] if entries else 0.0)
         self.hint.setVisible(False)
-        row.name_field.setFocus()
+        row.route_field.setFocus()
 
     def commit_row(self, row):
-        if not self.game:
+        if not self.game or self._updating:
             return
         name = (row.name_field.text() or "").strip()
-        raw_time = (row.time_field.text() or "").strip()
-        seconds = parse_route_time(raw_time) if raw_time else 0.0
         if not name:
             return
-        if seconds is None:
-            row.time_field.setStyleSheet("border:1px solid #ef4444;")
+        entries = [dict(entry) for entry in self._entries()]
+        index = next((i for i, entry in enumerate(entries) if entry["name"] == row.original), None)
+        if index is None:
+            index = len(entries)
+            entries.append({"name": name, "seconds": 0.0,
+                            "acc": entries[-1]["acc"] if entries else 0.0})
+        elif name != row.original and any(entry["name"] == name for entry in entries):
+            self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
+            self.hint.setVisible(True)
+            return
+        route_raw = (row.route_field.text() or "").strip()
+        acc_raw = (row.acc_field.text() or "").strip()
+        route_typed = parse_route_time(route_raw) if route_raw else 0.0
+        acc_typed = parse_route_time(acc_raw) if acc_raw else 0.0
+        if route_typed is None or acc_typed is None:
+            for field in (row.route_field, row.acc_field):
+                field.setStyleSheet("border:1px solid #ef4444;")
             self.hint.setText(tr("That time cannot be read. Try 1h 30m, 1:30 or 90."))
             self.hint.setVisible(True)
             return
-        row.time_field.setStyleSheet("")
-        if row.original:
-            if name != row.original and name in self.engine.route_names(self.game):
-                self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
-                self.hint.setVisible(True)
-                return
-            if (name, seconds) != (row.original,
-                                   self.engine.route_seconds(self.game, row.original)):
-                self.engine.rename_route(self.game, row.original, name, seconds)
-                row.original = name
+        row.route_field.setStyleSheet("")
+        row.acc_field.setStyleSheet("")
+        previous = entries[index - 1]["acc"] if index > 0 else 0.0
+        if row._last_edited == "acc" and acc_raw:
+            acc = max(previous, acc_typed)
+            seconds = acc - previous
         else:
-            if not self.engine.add_route(self.game, name, seconds):
-                self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
-                self.hint.setVisible(True)
-                return
-            row.original = name
+            seconds = max(0.0, route_typed)
+            acc = previous + seconds
+        entries[index] = {"name": name, "seconds": seconds, "acc": acc}
+        for later in range(index + 1, len(entries)):
+            entries[later]["acc"] = entries[later - 1]["acc"] + entries[later]["seconds"]
+        self._updating = True
+        try:
+            ok = self.engine.set_all_routes(
+                self.game, [(entry["name"], entry["seconds"], entry["acc"]) for entry in entries])
+        finally:
+            self._updating = False
+        if not ok:
+            self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
+            self.hint.setVisible(True)
+            return
+        row.original = name
+        self._changed()
+
+    def set_current(self):
+        if not self.game:
+            return
         from .core import format_time
-        row.time_field.setText(format_time(seconds) if seconds else "")
+        entries = self._entries()
+        if not entries:
+            self.hint.setText(tr("Add a route first."))
+            self.hint.setVisible(True)
+            return
+        recorded = float(self.engine.total_seconds or 0.0)
+        previous = entries[-2]["acc"] if len(entries) > 1 else 0.0
+        if recorded <= previous:
+            self.hint.setText(tr("The recorded total (%s) is not larger than the route above.")
+                              % format_time(recorded))
+            self.hint.setVisible(True)
+            return
+        question = tr("Set the accumulative time of \u201c%s\u201d to the current total playtime (%s)?") % (
+            entries[-1]["name"], format_time(recorded))
+        if QMessageBox.question(self, tr("Set current time"), question) != QMessageBox.Yes:
+            return
+        entries[-1]["acc"] = recorded
+        entries[-1]["seconds"] = recorded - previous
+        self._updating = True
+        try:
+            self.engine.set_all_routes(
+                self.game, [(entry["name"], entry["seconds"], entry["acc"]) for entry in entries])
+        finally:
+            self._updating = False
         self._changed()
 
     def remove_row(self, row):

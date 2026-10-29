@@ -381,5 +381,16 @@
   "{vndb} – VNDB id (used in the button URL)": "{vndb} – VNDB id (used in the button URL)",
   "{year} – release year": "{year} – release year",
   "Capture the game": "Capture the game",
-  "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.": "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game."
+  "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.": "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.",
+  "ROUTE": "ROUTE",
+  "ROUTE TIME": "ROUTE TIME",
+  "ACCUMULATIVE": "ACCUMULATIVE",
+  "TOTAL": "TOTAL",
+  "Time spent in this route": "Time spent in this route",
+  "Total playtime when this route ends": "Total playtime when this route ends",
+  "Use the playtime the app has recorded so far": "Use the playtime the app has recorded so far",
+  "Set current time": "Set current time",
+  "Add a route first.": "Add a route first.",
+  "The recorded total (%s) is not larger than the route above.": "The recorded total (%s) is not larger than the route above.",
+  "Set the accumulative time of “%s” to the current total playtime (%s)?": "Set the accumulative time of “%s” to the current total playtime (%s)?"
 }

@@ -404,5 +404,16 @@
   "{vndb} – VNDB id (used in the button URL)": "{vndb} – VNDB 編號（用於按鈕連結）",
   "{year} – release year": "{year} – 發售年份",
   "Capture the game": "截取遊戲畫面",
-  "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.": "遊戲被 Magpie 放大時，會截取放大後的畫面而不是遊戲本身的視窗，所以截圖總是完整的遊戲畫面。"
+  "When Magpie upscales the game, the upscaled picture is captured instead of the game's own window, so the screenshot always shows the full game.": "遊戲被 Magpie 放大時，會截取放大後的畫面而不是遊戲本身的視窗，所以截圖總是完整的遊戲畫面。",
+  "ROUTE": "路線",
+  "ROUTE TIME": "路線時間",
+  "ACCUMULATIVE": "累計時間",
+  "TOTAL": "總計",
+  "Time spent in this route": "這條路線花費的時間",
+  "Total playtime when this route ends": "這條路線結束時的總遊玩時間",
+  "Use the playtime the app has recorded so far": "使用 app 目前記錄的遊玩時間",
+  "Set current time": "設定目前時間",
+  "Add a route first.": "請先新增一條路線。",
+  "The recorded total (%s) is not larger than the route above.": "記錄的總時間（%s）沒有大於上一條路線。",
+  "Set the accumulative time of “%s” to the current total playtime (%s)?": "把「%s」的累計時間設為目前總遊玩時間（%s）？"
 }

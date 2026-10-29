@@ -4,12 +4,16 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.2** — a bug-fix release on top of 2.3.1. VNDB ratings
-fetched from the new API are shown on the same 0–10 scale as before instead of
-ten times bigger, the hover texts and the presence text accept the `{title}`
-style variables everywhere (they used to stay literal in the small image text),
-the Detection preview draws the small image and its hover text, and the exe is
-built from a clean environment (about 32 MB instead of 54 MB). It builds on
+Current release: **2.3.4** — every route now carries two numbers: the time
+spent in that route and the playtime reached when it ends. Typing either one
+fills the other in, a total strip under the list shows the last accumulated
+time, and *Set current time* fills the last route with the playtime the app has
+recorded so far. It builds on 2.3.2, a bug-fix release on top of 2.3.1: VNDB
+ratings fetched from the new API are shown on the same 0–10 scale as before
+instead of ten times bigger, the hover texts and the presence text accept the
+`{title}` style variables everywhere (they used to stay literal in the small
+image text), the Detection preview draws the small image and its hover text, and
+the exe is built from a clean environment (about 32 MB instead of 54 MB). It builds on
 2.3.1, which captures the whole game even while Magpie upscales it, and on 2.3.0:
 a Library that can show covers instead of a list and remembers where the window
 was, a *Last read* column, an *Idle* status that stops the clock after a
@@ -42,8 +46,11 @@ game you are playing, without you touching anything.
   between — and see the time per game, a chart, and every individual session.
 - **Screenshots.** One hotkey saves the game (or Magpie's upscaled picture of it) into one folder per game; the
   gallery browses, searches and opens them.
-- **Routes.** For long games, keep your own list of routes with the time you spent
-  in each one, typed in by hand.
+- **Routes.** For long games, keep your own list of routes. Each row holds the
+  time spent in that route and the playtime reached when it ends; type either one
+  and the other follows, and a total strip under the list repeats the last
+  number. *Set current time* copies the playtime the app has recorded into the
+  last route, after asking.
 - **Launchers.** Japanese games often need a locale emulator (Locale Emulator,
   GalFC) or a custom command; the app can start them that way.
 - **Three languages** — English, Traditional Chinese, Simplified Chinese — and dark
@@ -80,7 +87,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.2
+cd HyggerPresence/HyggerPresence_2.3.4
 pip install -r requirements.txt
 python main.py
 ```
@@ -113,7 +120,7 @@ needed to reproduce it:
 
 ```bat
 python -m venv buildenv
-buildenv\Scripts\pip install -r HyggerPresence_2.3.2\requirements.txt pyinstaller
+buildenv\Scripts\pip install -r HyggerPresence_2.3.4\requirements.txt pyinstaller
 buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
 ```
 
@@ -286,7 +293,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.2/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.4/          current sources (older versions: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log
