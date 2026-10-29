@@ -359,6 +359,7 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     /* the caption line and the total line sit on the card itself, not on a band */
     QWidget#routeshead, QWidget#routestotal {{ background: transparent; }}
     QWidget#previewtimer {{ background: transparent; }}
+    QWidget#pvthumb {{ background: transparent; }}
     QLabel#totalvalue {{ color: {p['text']}; font-size: 13px; font-weight: 600; }}
     QPushButton#ghost {{ background: transparent; color: {p['subtext']};
                border: 1px solid {p['border']}; border-radius: 7px; padding: 6px 12px; }}
@@ -580,6 +581,32 @@ def square_pixmap(pixmap, size):
     left = max(0, (scaled.width() - pixels) // 2)
     top = max(0, (scaled.height() - pixels) // 2)
     cropped = scaled.copy(left, top, pixels, pixels)
+    cropped.setDevicePixelRatio(ratio)
+    return cropped
+
+
+def fill_pixmap(pixmap, width, height):
+    """Scale a pixmap so it covers ``width x height``, then crop the middle.
+
+    Discord paints the large image as a square thumbnail and the screenshot
+    cards paint their art edge to edge, so a portrait cover that is merely
+    fitted leaves strips of the widget's own background down the sides - the
+    "off colour box" that showed up around covers.
+    """
+    if pixmap is None:
+        return pixmap
+    if not isinstance(pixmap, QPixmap):
+        pixmap = QPixmap.fromImage(pixmap)
+    if pixmap.isNull():
+        return pixmap
+    ratio = pixmap.devicePixelRatio() or 1.0
+    pixels_w = max(1, int(round(width * ratio)))
+    pixels_h = max(1, int(round(height * ratio)))
+    scaled = pixmap.scaled(pixels_w, pixels_h, Qt.KeepAspectRatioByExpanding,
+                           Qt.SmoothTransformation)
+    left = max(0, (scaled.width() - pixels_w) // 2)
+    top = max(0, (scaled.height() - pixels_h) // 2)
+    cropped = scaled.copy(left, top, pixels_w, pixels_h)
     cropped.setDevicePixelRatio(ratio)
     return cropped
 
@@ -1865,6 +1892,9 @@ class NowPage(Page):
         # circle sticks out of the thumbnail's square by a few pixels. A
         # slightly larger parent gives it room to do that.
         self.pv_thumb = QWidget()
+        # the global QWidget rule paints the window colour, which left a dark
+        # square around the square thumbnail; it must let the card through
+        self.pv_thumb.setObjectName("pvthumb")
         self.pv_thumb.setFixedSize(90, 90)
         pv_body.addWidget(self.pv_thumb, 0, Qt.AlignTop)
         self.prev_cover = QLabel("VN", self.pv_thumb)
@@ -2031,8 +2061,8 @@ class NowPage(Page):
         self.record_button.setStyleSheet(
             "QPushButton{background:%s;color:%s;border:none;border-radius:7px;"
             "padding:7px 14px;font-weight:600;}"
-            % (theme["green"] if recorded else theme["surface2"],
-               ink_on(theme["green"]) if recorded else theme["subtext"]))
+            % (theme["green"] if recorded else theme["red"],
+               ink_on(theme["green"]) if recorded else "#ffffff"))
         preview = self.engine.preview or {}
         if not preview:
             self.title_label.setText(tr("No game yet"))
@@ -2219,9 +2249,9 @@ class NowPage(Page):
         if image is None:
             return
         self.cover.setPixmap(scaled_for(image, 150, 210, self.cover))
+        # the Discord thumbnail is a square, so crop the portrait cover into it
         self.prev_cover.setPixmap(rounded_pixmap(
-            scaled_for(image, 84, 84, self.prev_cover,
-                       Qt.KeepAspectRatioByExpanding), 10))
+            fill_pixmap(scaled_for(image, 84, 84, self.prev_cover), 84, 84), 10))
 
 
 EDGE = 16
@@ -3517,7 +3547,7 @@ class ScreenshotPage(Page):
             try:
                 pixmap = self._cached_thumb(path, self.THUMB)
                 if not pixmap.isNull() and label is not None:
-                    label.setPixmap(pixmap)
+                    label.setPixmap(rounded_pixmap(fill_pixmap(pixmap, *self.THUMB), 6))
             except RuntimeError:
                 pass
 
@@ -3964,12 +3994,12 @@ class ScreenshotPage(Page):
         art = QLabel()
         art.setFixedSize(*self.COVER)
         art.setAlignment(Qt.AlignCenter)
-        art.setStyleSheet("QLabel{background:%s;border-radius:4px;}"
-                          % self.window.palette["surface2"])
+        # no colour of its own: the cover fills the box, so anything left over
+        # showed up as strips of a different shade down the sides
+        art.setStyleSheet("QLabel{background:transparent;border-radius:6px;}")
         cover = self._cover_for(folder)
         if cover is not None:
-            art.setPixmap(cover.scaled(self.COVER[0], self.COVER[1], Qt.KeepAspectRatio,
-                                       Qt.SmoothTransformation))
+            art.setPixmap(rounded_pixmap(fill_pixmap(cover, *self.COVER), 6))
         lay.addWidget(art, 0, Qt.AlignHCenter)
         name = QLabel(self._library_title(folder))
         name.setObjectName("h3")
@@ -3996,14 +4026,15 @@ class ScreenshotPage(Page):
         art = QLabel()
         art.setFixedSize(*self.THUMB)
         art.setAlignment(Qt.AlignCenter)
-        art.setStyleSheet("QLabel{background:%s;border-radius:4px;}"
-                          % self.window.palette["surface2"])
+        # the shot fills the box: a label colour here left bars beside a cover
+        # that is not exactly the thumbnail's aspect ratio
+        art.setStyleSheet("QLabel{background:transparent;border-radius:6px;}")
         if deferred:
             pass                      # _fill() queues the job after adding the card
         else:
             pixmap = self._cached_thumb(path, self.THUMB)
             if not pixmap.isNull():
-                art.setPixmap(pixmap)
+                art.setPixmap(rounded_pixmap(fill_pixmap(pixmap, *self.THUMB), 6))
         lay.addWidget(art, 0, Qt.AlignHCenter)
         name = QLabel(path.name)
         name.setObjectName("sub")
@@ -5693,28 +5724,28 @@ class RoutesEditor(QWidget):
         total_line.addSpacing(49)
         layout.addWidget(self.total_row)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        actions.addStretch(1)
-        self.set_button = QPushButton(tr("Set current time"))
-        self.set_button.setCursor(Qt.PointingHandCursor)
-        self.set_button.setToolTip(tr("Use the playtime the app has recorded so far"))
-        # the ghost style left it looking like a caption; this is the card's action
-        self.set_button.setStyleSheet(
-            "QPushButton{background:#16a34a;color:#ffffff;border:none;"
-            "border-radius:7px;padding:6px 14px;font-weight:600;}"
-            "QPushButton:hover{background:#15803d;}"
-            "QPushButton:pressed{background:#166534;}"
-            "QPushButton:disabled{background:transparent;color:#6b7280;"
-            "border:1px solid #4b5563;font-weight:400;}")
-        self.set_button.clicked.connect(self.set_current)
-        actions.addWidget(self.set_button)
-        layout.addLayout(actions)
-
-        self.hint = QLabel(tr("Add the routes you have finished and the time you spent in each."))
+        # the message shares the action row, so a hint or an error no longer
+        # adds a line of its own under the button
+        self._message = ""
+        self.hint = QLabel("")
         self.hint.setObjectName("help")
         self.hint.setWordWrap(True)
-        layout.addWidget(self.hint)
+        self.hint.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        # the message takes the free width, so it stays on one line; the button
+        # keeps its natural size instead of stretching across an empty card
+        actions.addWidget(self.hint, 1)
+        self.set_button = QPushButton(tr("Set current time"))
+        # the same blue as the Start button in the library
+        self.set_button.setObjectName("primary")
+        self.set_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.set_button.setCursor(Qt.PointingHandCursor)
+        self.set_button.setToolTip(tr("Use the playtime the app has recorded so far"))
+        self.set_button.clicked.connect(self.set_current)
+        actions.addWidget(self.set_button, 0)
+        layout.addLayout(actions)
         # everything stays at the top; the card grows with its rows instead of
         # leaving the + stranded at the bottom of an empty box
         layout.addStretch(1)
@@ -5785,9 +5816,20 @@ class RoutesEditor(QWidget):
         self.total_value.setText(format_time(entries[-1]["acc"]) if has_rows else "")
         has_game = bool(self.game)
         self.add_button.setEnabled(has_game)
-        # with no route yet the button still answers with what to do first
+        # the button only has something to fill in once a route exists
+        self.set_button.setVisible(has_rows)
         self.set_button.setEnabled(has_game)
-        self.hint.setVisible(not self.rows)
+        # the label stays in the layout even when it is empty: a hidden widget
+        # would leave the button floating in the middle of the row
+        self.hint.setText(self._message or ("" if self.rows else self._help()))
+
+    def _help(self):
+        return tr("Add the routes you have finished and the time you spent in each.")
+
+    def _say(self, text):
+        """Put a message on the action row (it takes the empty-state help's place)."""
+        self._message = text
+        self.hint.setText(text)
 
     def _resync(self):
         """Keep widget order the same as the route order."""
@@ -5812,7 +5854,8 @@ class RoutesEditor(QWidget):
             return
         entries = self._entries()
         row = self._append_row("", 0.0, entries[-1]["acc"] if entries else 0.0)
-        self.hint.setVisible(False)
+        self._message = ""
+        self.hint.setText("")
         row.route_field.setFocus()
 
     def commit_row(self, row):
@@ -5828,8 +5871,7 @@ class RoutesEditor(QWidget):
             entries.append({"name": name, "seconds": 0.0,
                             "acc": entries[-1]["acc"] if entries else 0.0})
         elif name != row.original and any(entry["name"] == name for entry in entries):
-            self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
-            self.hint.setVisible(True)
+            self._say(tr("There is already a route called \u201c%s\u201d.") % name)
             return
         route_raw = (row.route_field.text() or "").strip()
         acc_raw = (row.acc_field.text() or "").strip()
@@ -5838,8 +5880,7 @@ class RoutesEditor(QWidget):
         if route_typed is None or acc_typed is None:
             for field in (row.route_field, row.acc_field):
                 field.setStyleSheet("border:1px solid #ef4444;")
-            self.hint.setText(tr("That time cannot be read. Try 1h 30m, 1:30 or 90."))
-            self.hint.setVisible(True)
+            self._say(tr("That time cannot be read. Try 1h 30m, 1:30 or 90."))
             return
         row.route_field.setStyleSheet("")
         row.acc_field.setStyleSheet("")
@@ -5860,8 +5901,7 @@ class RoutesEditor(QWidget):
         finally:
             self._updating = False
         if not ok:
-            self.hint.setText(tr("There is already a route called \u201c%s\u201d.") % name)
-            self.hint.setVisible(True)
+            self._say(tr("There is already a route called \u201c%s\u201d.") % name)
             return
         row.original = name
         self._changed()
@@ -5872,15 +5912,13 @@ class RoutesEditor(QWidget):
         from .core import format_time
         entries = self._entries()
         if not entries:
-            self.hint.setText(tr("Add a route first."))
-            self.hint.setVisible(True)
+            self._say(tr("Add a route first."))
             return
         recorded = float(self.engine.total_seconds or 0.0)
         previous = entries[-2]["acc"] if len(entries) > 1 else 0.0
         if recorded <= previous:
-            self.hint.setText(tr("The recorded total (%s) is not larger than the route above.")
+            self._say(tr("The recorded total (%s) is not larger than the route above.")
                               % format_time(recorded))
-            self.hint.setVisible(True)
             return
         question = tr("Set the accumulative time of \u201c%s\u201d to the current total playtime (%s)?") % (
             entries[-1]["name"], format_time(recorded))
@@ -5909,6 +5947,8 @@ class RoutesEditor(QWidget):
         self._changed()
 
     def _changed(self):
+        # a rebuilt list means the last message has been dealt with
+        self._message = ""
         self.refresh(force=True)
         if self.on_change is not None:
             self.on_change()

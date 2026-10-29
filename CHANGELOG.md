@@ -6,8 +6,8 @@
 session, total, statistics and the timer on the Discord card — and keeps what was
 already recorded. The routes card is no longer hidden when a game has no route
 yet: it shows its name and the `+`, and gains its two time columns with the first
-row. The `+` moved up onto the total line and *Set current time* became a green
-button.
+row. The `+` moved up onto the total line, and *Set current time* is now the blue
+action of the card and only shows up once there is a route to fill in.
 
 ### Added
 - **Record Time (ON/OFF).** A button next to *Presence* turns the clock off
@@ -25,15 +25,26 @@ button.
   captions (and the total number) only appear once the first route is there.
 - **The `+` sits on the total line.** One row fewer: the total strip carries the
   add button on its left, so the card no longer ends in an empty band.
-- **Set current time is a green button.** The ghost style made it look like a
-  caption; it is now the card's filled action, with a disabled state for when no
-  game is detected.
+- **Set current time is the card's blue action.** It wears the same blue as the
+  *Start* button in the library instead of a green of its own, and it only
+  appears once a route exists — with an empty list there is nothing to fill in.
+- **Messages stay on the action row.** "The recorded total is not larger than the
+  route above" and the other hints share the line with the button, so an error
+  never pushes the card taller.
+- *Record Time: OFF* is red, like *Presence: OFF*, instead of a grey chip that
+  read as disabled.
 - *Presence: ON* and *Record Time: ON* share the same chip and pick black or
   white text from the theme's green, so the pair reads the same in both themes.
 
 ### Fixed
 - A routes card with no rows could hide the whole section, which left the
   Detection page looking like the feature was missing.
+- **No more odd-coloured square behind a cover.** The Discord preview's thumbnail
+  box and the cover of a screenshot card painted the window colour behind the
+  image, which showed as a darker square around the art (and as bars beside a
+  cover that was not exactly square). The art now fills the whole box: the
+  preview cover is cropped to 84×84 and the gallery covers are fitted, both with
+  rounded corners.
 
 ## 2.3.4 - 2026-10-30
 

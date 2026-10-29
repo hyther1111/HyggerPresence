@@ -31,11 +31,25 @@ is how you left it.
   table full of headings.
 - **The `+` moved up.** It now sits on the total line, on the left, right where
   the next route is going to appear. The card ends one row sooner.
-- **Set current time is green.** It was a ghost button that read like a caption;
-  now it is the card's filled action, and it dims while no game is detected.
+- **Set current time is the blue action.** It wears the same blue as the *Start*
+  button in the library, and it only shows up once there is a route to fill in —
+  on an empty list there is nothing to fill.
+- **Messages sit next to the button.** "The recorded total is not larger than the
+  route above" and the other hints share the action row, so a message never makes
+  the card taller.
 
 *Presence* and *Record Time* share the same chip and pick black or white text from
 the theme's green, so the pair looks the same in the dark and the light theme.
+*Record Time: OFF* turns red, like *Presence: OFF*, so an off switch reads as off
+instead of as a disabled button.
+
+## The odd square behind a cover
+
+The Discord preview's thumbnail box and the cover on a screenshot card painted
+the window colour behind the image. With a cover that was not exactly square, the
+leftover strip showed as a darker square (or as bars down the sides). The art now
+fills its box: the preview cover is cropped to the square, the gallery covers are
+fitted, and both keep their rounded corners — the small image stays a circle.
 
 ## Under the hood
 
@@ -44,6 +58,8 @@ the theme's green, so the pair looks the same in the dark and the light theme.
   session or the total.
 - The routes card no longer collapses to nothing when a game has no routes; the
   captions are hidden individually instead.
+- Every preview/gallery image goes through one `fill_pixmap` helper, so no label
+  has to fake a background colour behind the art.
 
 ## Download
 
