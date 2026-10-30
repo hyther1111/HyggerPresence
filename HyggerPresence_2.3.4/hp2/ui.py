@@ -1272,6 +1272,13 @@ class LibraryPage(Page):
         self.heading.setObjectName("h1")
         head.addWidget(self.heading)
         head.addStretch(1)
+        self.vndb_all_button = QPushButton(tr("Fetch all from VNDB"))
+        self.vndb_all_button.setToolTip(
+            tr("Refresh titles, ratings and details for every game that "
+               "has a VNDB id"))
+        self.vndb_all_button.clicked.connect(self.fetch_all_vndb)
+        head.addWidget(self.vndb_all_button)
+        head.addSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("Search title, developer, exe…"))
         self.search.setFixedWidth(240)
@@ -1294,6 +1301,17 @@ class LibraryPage(Page):
         head.addWidget(self.refresh_button)
         outer.addLayout(head)
 
+        self.vndb_progress = QProgressBar()
+        self.vndb_progress.setTextVisible(False)
+        self.vndb_progress.setFixedHeight(16)
+        self.vndb_progress.hide()
+        outer.addWidget(self.vndb_progress)
+        self.vndb_notes = QLabel("")
+        self.vndb_notes.setObjectName("sub")
+        self.vndb_notes.hide()
+        outer.addWidget(self.vndb_notes)
+        self._vndb_thread = None
+
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels([tr(name) for name in self.COLUMNS])
         self.table.verticalHeader().setVisible(False)
@@ -1315,7 +1333,7 @@ class LibraryPage(Page):
         self._remember_header = attach_column_tools(self.table, "library", self.window)
 
         self.empty_hint = QLabel(
-            "No games yet.\n\nUse “Add game…”, or bring your 1.x data over with\n"
+            "No games yet.\n\nUse “Add game”, or bring your 1.x data over with\n"
             "Settings → General → “Import 1.x data…”")
         self.empty_hint.setObjectName("sub")
         self.empty_hint.setAlignment(Qt.AlignCenter)
@@ -1337,20 +1355,23 @@ class LibraryPage(Page):
         self.start_button = QPushButton(tr("Start"))
         self.start_button.setObjectName("primary")
         self.start_button.setMenu(self._build_start_menu())
-        self.add_button = QPushButton(tr("Add game…"))
-        self.edit_button = QPushButton(tr("Edit…"))
+        self.add_button = QPushButton(tr("Add game"))
+        self.edit_button = QPushButton(tr("Edit"))
         self.remove_button = QPushButton(tr("Remove"))
         self.vndb_button = QPushButton(tr("View on VNDB"))
         self.folder_button = QPushButton(tr("Open in folder"))
         self.folder_button.setToolTip(tr("Show the game's .exe in Explorer"))
-        self.cover_button = QPushButton(tr("Change cover…"))
+        self.cover_button = QPushButton(tr("Change cover"))
         self.cover_button.setToolTip(tr("Pick one of the VN covers from VNDB"))
+        self.sync_button = QPushButton(tr("Sync totals"))
+        self.sync_button.setToolTip(
+            tr("Raise this game's total to the play time stats.db recorded"))
         self.clear_button = QPushButton(tr("Clear presence"))
         self.clear_button.setObjectName("danger")
         self.clear_button.setToolTip(tr("Clear the Discord card now (it comes back on the next tick)"))
         for button in (self.start_button, self.add_button, self.edit_button,
                        self.remove_button, self.vndb_button, self.cover_button,
-                       self.folder_button):
+                       self.folder_button, self.sync_button):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         toolbar.addWidget(self.clear_button)
@@ -1358,6 +1379,7 @@ class LibraryPage(Page):
 
         self.add_button.clicked.connect(self.add_game)
         self.edit_button.clicked.connect(self.edit_selected)
+        self.sync_button.clicked.connect(self.sync_selected)
         self.remove_button.clicked.connect(self.remove_selected)
         self.vndb_button.clicked.connect(self.open_vndb)
         self.folder_button.clicked.connect(self.open_in_folder)
@@ -1579,6 +1601,119 @@ class LibraryPage(Page):
                 pass
 
     # ---------- data ----------
+    def fetch_all_vndb(self):
+        """Refresh title/rating/cover for every game that has a VNDB id."""
+        if self._vndb_thread is not None:
+            return
+        games = [g for g in self.engine.games
+                 if (g.get("vndb_id") or "").strip()]
+        if not games:
+            QMessageBox.information(self, tr("VNDB"),
+                                    tr("No game has a VNDB id yet."))
+            return
+        self._vndb_signals = VndbSignals(self)
+        self._vndb_signals.progress.connect(self._on_vndb_progress)
+        self._vndb_signals.finished.connect(self._on_vndb_done)
+        self.vndb_all_button.setEnabled(False)
+        self.vndb_progress.setRange(0, len(games))
+        self.vndb_progress.setValue(0)
+        self.vndb_progress.show()
+        self.vndb_notes.setText(
+            tr("Refreshing %d game(s) from VNDB…") % len(games))
+        self.vndb_notes.show()
+        signals = self._vndb_signals
+        app = self.window.app
+
+        def worker():
+            results = []
+            failed = 0
+            first_error = ""
+            for index, game in enumerate(games):
+                try:
+                    info = app.fetch_vndb(
+                        (game.get("vndb_id") or "").strip().lower())
+                except Exception as error:      # one bad id is not fatal
+                    info = None
+                    if not first_error:
+                        first_error = str(error)
+                if info:
+                    results.append((game, info))
+                else:
+                    failed += 1
+                signals.progress.emit(index + 1, len(games))
+            signals.finished.emit(results, failed, first_error)
+
+        self._vndb_thread = threading.Thread(target=worker, daemon=True)
+        self._vndb_thread.start()
+
+    def _on_vndb_progress(self, done, total):
+        self.vndb_progress.setValue(done)
+        self.vndb_notes.setText(
+            tr("Refreshing %d of %d game(s)…") % (done, total))
+
+    def _on_vndb_done(self, results, failed, error):
+        self._vndb_thread = None
+        self.vndb_all_button.setEnabled(True)
+        self.vndb_progress.hide()
+        updated = 0
+        for game, info in results or []:
+            if merge_vndb(game, info):
+                updated += 1
+        if updated:
+            store.save_games(self.engine.games)
+            self.refresh()
+            self.window.now_page.update_from_engine()
+        if updated:
+            self.vndb_notes.setText(
+                tr("Updated %d game(s) from VNDB.") % updated)
+        elif failed:
+            self.vndb_notes.setText(
+                tr("Could not refresh %d game(s).") % failed)
+        else:
+            self.vndb_notes.setText(tr("Nothing needed updating."))
+        if error:
+            self.vndb_notes.setToolTip(error)
+        QTimer.singleShot(6000, self.vndb_notes.hide)
+
+    def sync_selected(self):
+        """Raise one game's total to what stats.db recorded for it."""
+        from .core import format_time
+        game = self.selected()
+        if game is None:
+            QMessageBox.information(self, tr("Sync totals"),
+                                    tr("Select a game first."))
+            return
+        stats = getattr(self.window.app, "stats", None)
+        try:
+            recorded = (stats.seconds_by_game() if stats else {}).get(
+                stats_key(game))
+        except Exception as error:
+            QMessageBox.warning(self, tr("Sync totals"), str(error))
+            return
+        stored = float(game.get("total_seconds") or 0)
+        if recorded is None:
+            QMessageBox.information(
+                self, tr("Sync totals"),
+                tr("stats.db has no session for this game yet."))
+            return
+        if float(recorded) <= stored + 0.5:
+            QMessageBox.information(
+                self, tr("Sync totals"),
+                tr("Already in sync: %s.") % format_time(stored))
+            return
+        answer = QMessageBox.question(
+            self, tr("Sync totals"),
+            tr("stats.db recorded %s, this game shows %s.\n\n"
+               "Raise the total to %s?")
+            % (format_time(float(recorded)), format_time(stored),
+               format_time(float(recorded))))
+        if answer != QMessageBox.Yes:
+            return
+        game["total_seconds"] = float(recorded)
+        store.save_games(self.engine.games)
+        self.refresh()
+        self.window.now_page.update_from_engine()
+
     def selected(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
@@ -1904,7 +2039,7 @@ class NowPage(Page):
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        self.cover_button = QPushButton("Change cover\u2026")
+        self.cover_button = QPushButton("Change cover")
         self.cover_button.clicked.connect(self.change_cover)
         self.vndb_button = QPushButton(tr("View on VNDB"))
         self.vndb_button.clicked.connect(self.open_vndb)
@@ -2987,7 +3122,19 @@ class StatsPage(Page):
     def refresh(self, flush=False):
         if not flush and not self.isVisible():
             return
+        engine = self.engine
+        if not flush and engine.game is not None and engine.status == "Reading":
+            # while a game runs the one-second clock tick repaints this page, so
+            # its card and Detection's total are formatted in the same pass from
+            # the same value; this timer then only handles charts and ranges
+            return
         return self._refresh_body(flush)
+
+    def refresh_now(self):
+        """Paint the page from the clock tick that also paints Detection."""
+        if not self.isVisible():
+            return
+        return self._refresh_body(False)
 
     def _refresh_body(self, flush=False):
         from .core import format_time
@@ -3223,8 +3370,11 @@ class StatsPage(Page):
             layout.addWidget(share)
             title = game["title"] or game["vndb_id"]
             cell.setProperty("vn_title", title)
+            cell.setProperty("vn_vndb", game["vndb_id"] or "")
             cell.clicked.connect(lambda card=cell: self._select_card(card))
-            cell.double.connect(lambda name=title: self.open_sessions_for(name))
+            cell.double.connect(
+                lambda name=title, vid=(game.get("vndb_id") or ""):
+                self.open_sessions_for(name, vid))
             cell.setContextMenuPolicy(Qt.CustomContextMenu)
             cell.customContextMenuRequested.connect(
                 lambda pos, card=cell: self._card_menu(card, pos))
@@ -3254,18 +3404,27 @@ class StatsPage(Page):
         self._selected_card = card
         self._selected_title = card.property("vn_title")
 
-    def open_sessions_for(self, title):
+    def _title_vndb(self, title):
+        for game in self.engine.games:
+            if (game.get("title") or "") == title:
+                return game.get("vndb_id") or ""
+        return ""
+
+    def open_sessions_for(self, title, vndb_id=None):
         start, end = self._range()
         dialog = SessionsDialog(self, start.isoformat(), end.isoformat(),
-                                only_title=title)
+                                only_title=title,
+                                only_vndb=vndb_id or self._title_vndb(title))
         dialog.exec()
         self.refresh()
 
-    def _card_actions(self, title):
+    def _card_actions(self, title, vndb_id=""):
         """What the right click menu on a game card offers."""
-        return [(tr("Sessions\u2026"), lambda: self.open_sessions_for(title)),
+        return [(tr("Sessions\u2026"),
+                 lambda: self.open_sessions_for(title, vndb_id)),
                 None,
-                (tr("Delete whole range"), lambda: self.delete_range_for(title))]
+                (tr("Delete whole range"),
+                 lambda: self.delete_range_for(title, vndb_id))]
 
     def _card_menu(self, card, pos):
         """Right click a game card: its sessions, or drop them for this range."""
@@ -3275,7 +3434,7 @@ class StatsPage(Page):
         if self._selected_card is not card:
             self._select_card(card)
         menu = QMenu(self)
-        for entry in self._card_actions(title):
+        for entry in self._card_actions(title, card.property("vn_vndb") or ""):
             if entry is None:
                 menu.addSeparator()
                 continue
@@ -3283,7 +3442,7 @@ class StatsPage(Page):
             menu.addAction(text, slot)
         menu.exec(card.mapToGlobal(pos))
 
-    def delete_range_for(self, title):
+    def delete_range_for(self, title, vndb_id=None):
         """Delete every session of one game inside the range on screen."""
         stats = getattr(self.app, "stats", None)
         if stats is None:
@@ -3295,7 +3454,8 @@ class StatsPage(Page):
                 tr("Delete every session of %s between %s and %s?")
                 % (who, start.isoformat(), end.isoformat())) != QMessageBox.Yes:
             return
-        stats.delete_range_for(start.isoformat(), end.isoformat(), title)
+        stats.delete_range_for(start.isoformat(), end.isoformat(), title,
+                               vndb_id or self._title_vndb(title))
         self._selected_card = None
         self._selected_title = None
         self.refresh()
@@ -3439,6 +3599,31 @@ def default_pictures():
     return str(shots.default_base_dir())
 
 
+# a fetch refreshes the text and the numbers; the cover is only ever
+# changed by "Change cover", so fetching never replaces a chosen image
+VNDB_FIELDS = ("title", "original", "romanized", "developer", "year",
+               "rating_average", "rating_weighted")
+
+
+def merge_vndb(game, info):
+    """Copy the fields VNDB knows into a game dict; True when something changed."""
+    changed = False
+    for key in VNDB_FIELDS:
+        value = (info or {}).get(key)
+        if value in (None, ""):
+            continue
+        if str(game.get(key) or "") != str(value):
+            game[key] = value
+            changed = True
+    return changed
+
+
+def stats_key(game):
+    """The key stats.db files a game's sessions under: VNDB id, else title."""
+    return ((game.get("vndb_id") or "").strip()
+            or (game.get("original") or game.get("title") or "").strip())
+
+
 class ShotSignals(QObject):
     """Carries a finished capture back to the GUI thread."""
 
@@ -3450,6 +3635,19 @@ class UpdateSignals(QObject):
 
     progress = Signal(int, int)
     finished = Signal(bool, str, str)      # ok, message, downloaded exe path
+
+
+class VndbSignals(QObject):
+    """Carries fetch-all progress back to the GUI thread."""
+
+    progress = Signal(int, int)             # done, total
+    finished = Signal(object, int, str)     # [(game, info)], failed, error
+
+
+class FetchSignals(QObject):
+    """Carries one finished VNDB fetch back to the GUI thread."""
+
+    done = Signal(object, object)           # game, info
 
 
 class ScreenshotPage(Page):
@@ -4654,6 +4852,15 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
                            "processes were matched and why a status was chosen. "
                            "Off by default; no data leaves your PC.")
 
+        self.auto_fetch_box = QCheckBox(
+            tr("Refresh VNDB data when a game starts"))
+        self.auto_fetch_box.setChecked(bool(config.get("auto_fetch_vndb", False)))
+        layout.addWidget(self.auto_fetch_box)
+        self._help(layout, "Fetches the game's title, developer, year and "
+                           "rating from VNDB once each time it starts. "
+                           "Needs a network connection; a failed fetch is "
+                           "ignored.")
+
         layout.addSpacing(14)
         layout.addWidget(QLabel(tr("Language")))
         self.language_box = NoWheelCombo()
@@ -5499,6 +5706,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         config["close_to_tray"] = bool(self.close_tray.isChecked())
         config["idle_seconds"] = int(self.idle_seconds.value())
         config["auto_check"] = bool(self.auto_check.isChecked())
+        config["auto_fetch_vndb"] = bool(self.auto_fetch_box.isChecked())
         config["templates"] = {
             status: dict(
                 {key: edit.text() for key, edit in self.fields[status].items()},
@@ -6227,7 +6435,7 @@ class GameEditorDialog(QDialog):
         self.vndb_edit.setText(info["id"])
         self.game.update({
             "title": info.get("title") or "", "original": info.get("original") or "",
-            "romanized": info.get("romanized") or "", "image": info.get("image") or "",
+            "romanized": info.get("romanized") or "",
             "developer": info.get("developer") or "Unknown",
             "year": info.get("year") or "????",
             "rating_average": info.get("rating_average") or "N/A",
@@ -6255,16 +6463,19 @@ class GameEditorDialog(QDialog):
 class SessionsDialog(QDialog):
     """The session log: delete a test launch, selected rows, or a whole range."""
 
-    def __init__(self, page, day_from, day_to, only_title=None):
+    PER_PAGE = (50, 100, 250, 500, 1000)
+
+    def __init__(self, page, day_from, day_to, only_title=None, only_vndb=None):
         super().__init__(page)
         self.page = page
         self.app = page.app
         self.day_from = day_from
         self.day_to = day_to
         self.only_title = only_title
+        self.only_vndb = only_vndb
         self.setWindowTitle(tr("Sessions \u2013 %s") % only_title
                             if only_title else tr("All sessions"))
-        self.resize(640, 460)
+        self.resize(720, 500)
         outer = QVBoxLayout(self)
         head = QLabel((tr("Sessions of %s between %s and %s")
                        % (only_title, day_from, day_to))
@@ -6273,6 +6484,36 @@ class SessionsDialog(QDialog):
                       % (day_from, day_to))
         head.setObjectName("sub")
         outer.addWidget(head)
+        self.note = QLabel("")
+        self.note.setObjectName("sub")
+        outer.addWidget(self.note)
+
+        # paging: a few hundred rows are fine in a table, a few thousand are
+        # not, so the query asks for one page at a time
+        self.per_page = int(getattr(page, "sessions_per_page", 100) or 100)
+        if self.per_page not in self.PER_PAGE:
+            self.per_page = 100
+        self.page_index = 0
+        self._pages = 1
+        pager = QHBoxLayout()
+        pager.addWidget(QLabel(tr("Rows per page")))
+        self.per_page_box = QComboBox()
+        for size in self.PER_PAGE:
+            self.per_page_box.addItem(str(size), size)
+        self.per_page_box.setCurrentIndex(self.PER_PAGE.index(self.per_page))
+        self.per_page_box.currentIndexChanged.connect(self._per_page_changed)
+        pager.addWidget(self.per_page_box)
+        pager.addStretch(1)
+        self.prev_button = QPushButton(tr("\u2039 Previous"))
+        self.prev_button.clicked.connect(lambda: self._goto(self.page_index - 1))
+        self.next_button = QPushButton(tr("Next \u203a"))
+        self.next_button.clicked.connect(lambda: self._goto(self.page_index + 1))
+        self.page_label = QLabel("")
+        self.page_label.setObjectName("sub")
+        pager.addWidget(self.prev_button)
+        pager.addWidget(self.page_label)
+        pager.addWidget(self.next_button)
+        outer.addLayout(pager)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels([tr("Date"), tr("Visual novel"),
@@ -6306,13 +6547,24 @@ class SessionsDialog(QDialog):
     def _reload(self):
         from .core import format_time
         stats = getattr(self.app, "stats", None)
-        rows = stats.sessions(self.day_from, self.day_to) if stats else []
-        if self.only_title:
-            # the stored title can differ slightly from the one shown on the card
-            wanted = self.only_title.strip()
-            rows = [row for row in rows
-                    if wanted and (wanted in (row[2] or "")
-                                   or (row[2] or "") in wanted)]
+        total = (stats.count_sessions(self.day_from, self.day_to,
+                                      title=self.only_title,
+                                      vndb_id=self.only_vndb)
+                 if stats else 0)
+        self._pages = max(1, (total + self.per_page - 1) // self.per_page)
+        # clamping here keeps the page valid after a delete emptied the last one
+        self.page_index = max(0, min(self.page_index, self._pages - 1))
+        rows = (stats.sessions(self.day_from, self.day_to,
+                               limit=self.per_page,
+                               offset=self.page_index * self.per_page,
+                               title=self.only_title,
+                               vndb_id=self.only_vndb)
+                if stats else [])
+        self.note.setText(tr("%d sessions") % total if total else "")
+        self.page_label.setText(tr("Page %d of %d")
+                                % (self.page_index + 1, self._pages))
+        self.prev_button.setEnabled(self.page_index > 0)
+        self.next_button.setEnabled(self.page_index < self._pages - 1)
         self.table.setRowCount(len(rows))
         for index, (row_id, day, title, seconds, start_ts) in enumerate(rows):
             started = time.strftime("%H:%M", time.localtime(start_ts)) if start_ts else ""
@@ -6321,6 +6573,21 @@ class SessionsDialog(QDialog):
             for column, item in enumerate(items):
                 self.table.setItem(index, column, item)
             self.table.item(index, 0).setData(Qt.UserRole, row_id)
+
+    def _goto(self, index):
+        index = max(0, min(index, self._pages - 1))
+        if index != self.page_index:
+            self.page_index = index
+            self._reload()
+
+    def _per_page_changed(self, _index=None):
+        size = self.per_page_box.currentData()
+        if not size or int(size) == self.per_page:
+            return
+        self.per_page = int(size)
+        self.page.sessions_per_page = self.per_page   # remembered while it runs
+        self.page_index = 0
+        self._reload()
 
     def delete(self, ids):
         stats = getattr(self.app, "stats", None)
@@ -6353,8 +6620,9 @@ class SessionsDialog(QDialog):
             return
         stats = getattr(self.app, "stats", None)
         if stats:
-            if self.only_title:
-                stats.delete_range_for(self.day_from, self.day_to, self.only_title)
+            if self.only_title or self.only_vndb:
+                stats.delete_range_for(self.day_from, self.day_to,
+                                       self.only_title, self.only_vndb)
             else:
                 stats.delete_range(self.day_from, self.day_to)
         self._reload()
@@ -7624,9 +7892,12 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.stack.setCurrentIndex(index)
         for position, button in enumerate(self.nav_buttons):
             button.setChecked(position == index)
+        # paint the page the moment it opens: while a game runs the clock tick
+        # owns the numbers, and it would otherwise arrive up to a second later
         if index == 2:
-            self.stats_page.refresh()
-            self.stats_page.refresh()
+            self.stats_page.refresh_now()
+        elif index == 1:
+            self.now_page.update_from_engine()
 
     def flash_status(self, text, seconds=2.5):
         """Temporary message in the status bar."""
@@ -7774,23 +8045,38 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self.request_cover(url, card._got_cover)
 
     def refresh_clock_display(self):
-        """Recount session/total once a second without running detection."""
+        """Recount session/total once a second without running detection.
+
+        Detection and Statistics read the same total from here and are painted
+        in the same pass: the two cards used to be refreshed by separate timers,
+        so a rounding step could land between them and they showed numbers one
+        second apart.
+        """
         engine = self.engine
-        if not self.now_page.isVisible():
+        show_now = self.now_page.isVisible()
+        show_stats = self.stats_page.isVisible()
+        if not (show_now or show_stats):
             return
         if engine.game is None:
             return
         if engine.status != "Reading":
             # the preview's own clock (paused/idle) still ticks; the session and
             # the total stay where the engine left them
-            self.now_page.refresh_preview_timer()
+            if show_now:
+                self.now_page.refresh_preview_timer()
+            if show_stats:
+                self.stats_page.refresh_now()
             return
         if engine._reading_start is None:
             return
-        current = max(0.0, time.time() - engine._reading_start)
+        now = time.time()
+        current = max(0.0, now - engine._reading_start)
         engine.session_seconds = engine._session_accumulated + current
-        engine.total_seconds = engine.game.get("total_seconds", 0) + current
-        self.now_page.update_from_engine()
+        engine.total_seconds = engine.live_total(now)
+        if show_now:
+            self.now_page.update_from_engine()
+        if show_stats:
+            self.stats_page.refresh_now()
 
     def _focus_changed(self, hwnd=None):
         """Coalesce a burst of focus events into a single tick.
@@ -7840,6 +8126,43 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self.clock_timer.stop()
             self.idle_timer.start(self.IDLE_TICK_MS)
 
+    def _maybe_auto_fetch(self):
+        """Refresh one game's VNDB data when it starts, if the user asked for it."""
+        game = self.engine.game
+        key = None
+        if game is not None and self.engine.status == "Reading":
+            key = game.get("exe")
+        if key == getattr(self, "_auto_fetch_key", None):
+            return
+        self._auto_fetch_key = key
+        if key is None or not (self.config or {}).get("auto_fetch_vndb"):
+            return
+        vndb_id = (game.get("vndb_id") or "").strip().lower()
+        if not vndb_id:
+            return
+        signals = getattr(self, "_fetch_signals", None)
+        if signals is None:
+            signals = FetchSignals(self)
+
+            def apply_fetch(target, info):
+                if info and merge_vndb(target, info):
+                    store.save_games(self.engine.games)
+                    self.library_page.refresh()
+                    self.now_page.update_from_engine()
+
+            signals.done.connect(apply_fetch)
+            self._fetch_signals = signals
+        app = self.app
+
+        def worker():
+            try:
+                info = app.fetch_vndb(vndb_id)
+            except Exception:
+                info = None
+            signals.done.emit(game, info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def tick(self):
         self.engine.tick()
         self.now_page.update_from_engine()
@@ -7857,6 +8180,7 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self._adapt_timers()
         # the Library row only needs a one-second timer while a game runs
         self.library_page.sync_live_timer(self.engine.game is not None)
+        self._maybe_auto_fetch()
         # refresh on this clock too: it is the same 1 s the engine ticked on,
         # so the row cannot fall behind the number it is showing
         self.library_page._live_refresh()
@@ -7920,6 +8244,9 @@ class Application:
             game.pop("square_cover", None)
             game.pop("square_cover_url", None)
         self.stats = StatsStore(store.STATS_FILE)
+        # totals are only reconciled when the user asks for it (Library ->
+        # Sync totals); raising them on startup made Detection jump on its
+        # own, which looked like the app inventing play time
         self.cover_cache = {}
         self.cover_bytes = {}
         self.cover_pending = set()

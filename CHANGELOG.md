@@ -29,6 +29,20 @@ Discord preview now matches the card Discord draws.
   not buried in the last row.
 - **Set current time.** One button fills the last route with the playtime the
   app has recorded so far. It asks first, because it overwrites a typed value.
+- **Fetch all from VNDB.** A button in the library header refreshes title,
+  developer, year and rating for every game that has a VNDB id, with a
+  progress bar under the header. It runs in the background, so the window stays
+  usable, and it saves once at the end.
+- **Refresh VNDB data when a game starts.** An optional switch in Settings →
+  General re-fetches that game's VNDB data each time it starts. Off by default
+  and silent: a failed fetch leaves the stored data alone.
+- **Session paging.** The session list shows 50, 100, 250, 500 or 1000 rows
+  at a time, chosen in a box above the table, with *Previous* / *Next* and a
+  "Page 2 of 3" label. One page is fetched at a time, so a range with
+  thousands of launches opens as fast as a short one.
+- **Sync totals.** The library toolbar has a per-game button that raises its
+  total to the play time `stats.db` recorded. It asks first and only ever
+  raises, so a hand-typed total is never lowered.
 
 ### Changed
 - **The Routes card is always visible on Detection.** With no route yet it shows
@@ -39,6 +53,11 @@ Discord preview now matches the card Discord draws.
 - **Set current time is the card's blue action.** It wears the same blue as the
   *Start* button in the library instead of a green of its own, and it only
   appears once a route exists — with an empty list there is nothing to fill in.
+- **Totals are no longer raised on startup.** The old build quietly caught
+  `games.json` up with `stats.db` when the app opened, which made Detection's
+  total jump on its own. That only happens now when *Sync totals* is pressed.
+- **Shorter button labels.** *Add game*, *Edit* and *Change cover* lost their
+  ellipsis in the library toolbar, and the library hint follows.
 - **Messages stay on the action row.** "The recorded total is not larger than the
   route above" and the other hints share the line with the button, so an error
   never pushes the card taller.
@@ -67,6 +86,12 @@ Discord preview now matches the card Discord draws.
 - 2.3.3 was a separate compact build; this release continues from 2.3.2.
 
 ### Fixed
+- **A game's session list could be empty while its card showed hours.** The
+  dialog used to pull the 500 newest sessions of the whole range and keep the
+  ones whose title matched, so a game played earlier in the range matched none
+  of them. The title and VNDB id are part of the query now, and *Delete whole
+  range* matches the same way — it used to miss rows whose stored title had
+  changed.
 - **No more odd-coloured square behind a cover.** The preview's thumbnail box and
   the cover of a screenshot card painted the window colour behind the image,
   which showed as a darker square around the art (and as bars beside a cover that
@@ -78,36 +103,12 @@ Discord preview now matches the card Discord draws.
   square.
 - A routes card with no rows could hide the whole section, which left the
   Detection page looking like the feature was missing.
-
-## 2.3.4 - 2026-10-30
-
-**In short:** route times can be typed two ways. Every route now shows the time
-spent in it and the playtime reached when it ends; typing either one fills the
-other in, a total strip under the list repeats the last number, and one button
-copies the playtime the app has recorded into the last route.
-
-### Added
-- **Route time and accumulative time.** The Routes editor (on Detection and in
-  the game editor) has two columns: the time spent in that route and the total
-  playtime when the route ends. Type either one and the other follows — the
-  route time is the difference to the route above, the accumulative time is the
-  running total. Rows below are renumbered, so a change in the middle never
-  leaves a broken total.
-- **A total strip under the routes.** It repeats the accumulative time of the
-  last route, right-aligned under its column, so the number you care about is
-  not buried in the last row.
-- **Set current time.** One button fills the last route with the playtime the
-  app has recorded so far. It asks first, because it overwrites a typed value.
-
-### Changed
-- Route lists saved by older versions only had one number per route. That value
-  is read as the route time and the accumulative column is rebuilt from it, so
-  nothing is lost and no `games.json` has to be edited.
-- 2.3.3 was a separate compact build; this release continues from 2.3.2.
-- **The Discord preview looks like the real card.** The big image is rounded and
-  the small one is a 34 px circle that hangs off its corner. The elapsed time
-  reads `2:58:34` once it passes an hour and wears Discord's little gamepad
-  instead of a triangle, and both pick up the theme's text colour.
+- **Detection and Statistics could read a second apart.** The two cards were
+  repainted by separate timers and each rounded its own value, so a tick landing
+  between them left one ahead of the other — and a total that had fallen behind
+  `stats.db` after a crash stayed behind for good. Both are now painted in the
+  same pass from the same number, and a stored total is raised back to what the
+  session log recorded when the app starts.
 
 ## 2.3.2 - 2026-10-28
 

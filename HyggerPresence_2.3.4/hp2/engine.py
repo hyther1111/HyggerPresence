@@ -241,6 +241,29 @@ class Engine(DetectorMixin):
         if presence is not None:
             self._close_async(presence)
 
+    def live_total(self, now=None):
+        """Played seconds for the current game, including what stats.db has not got.
+
+        The Detection card and the Statistics card have to show one number: the
+        rows in stats.db plus the pending part (the buffer that waits for a
+        write and the open stretch). Counting only the open stretch here left
+        the buffer out, and the two cards drifted by a second or two.
+        """
+        game = self.game
+        if game is None:
+            return float(self.total_seconds or 0.0)
+        buffered = self._stat_buffer if self._stat_buffer_game is game else 0.0
+        current = 0.0
+        if self._reading_start is not None:
+            if now is None:
+                now = time.time()
+            if self.status == "Idle":
+                from .winapi import get_idle_seconds
+                current = max(0.0, (now - get_idle_seconds()) - self._reading_start)
+            else:
+                current = max(0.0, now - self._reading_start)
+        return float(game.get("total_seconds", 0) or 0.0) + buffered + current
+
     def pending_seconds(self):
         """Seconds that are not in stats.db yet: the buffer plus the open segment."""
         total = self._stat_buffer
@@ -1109,7 +1132,8 @@ class Engine(DetectorMixin):
             self._arm_exit_watch(game, pids)
             current = (now - self._reading_start) if self._reading_start else 0.0
             self.session_seconds = self._session_accumulated + current
-            self.total_seconds = game.get("total_seconds", 0) + current
+            buffered = self._stat_buffer if self._stat_buffer_game is game else 0.0
+            self.total_seconds = game.get("total_seconds", 0) + buffered + current
             self.game = game
             identity = (game.get("exe"), game.get("vndb_id"))
             # A status change has to survive a moment before it reaches Discord:

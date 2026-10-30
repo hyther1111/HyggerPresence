@@ -97,6 +97,32 @@ total never goes backwards or skips.
 - *Presence* and *Record Time* now print in white in both themes, so the two
   chips match. *Record Time: OFF* turns red, like *Presence: OFF*, so an off
   switch reads as off instead of as a disabled button.
+- **The two totals always agree.** Detection's *Total read* and the Statistics
+  card are painted in the same pass from the same number, so they can no longer
+  show values one second apart.
+- **Sync totals.** A total left behind by a crash is no longer raised behind
+  your back when the app starts: the library toolbar has a *Sync totals*
+  button for the selected game. It asks first, shows both numbers, and only
+  ever raises, so a hand-typed total is never lowered.
+- **Fetch all from VNDB.** One button in the library header refreshes the
+  title, developer, year and rating of every game that has a VNDB id,
+  with a progress bar and no frozen window. Covers are never touched: only
+  *Change cover* replaces one. *Settings → General* can also refresh a
+  game as it starts.
+- **Shorter labels in the library.** *Add game*, *Edit* and *Change cover*
+  no longer carry an ellipsis, which leaves the toolbar room for *Sync
+  totals*.
+- **A game's session list is never empty by mistake.** The dialog pulled
+  the 500 newest sessions of the whole range and kept the ones whose
+  title matched, so a game played earlier in the range matched none of
+  them — its card said five hours, its list said nothing. The game is
+  now part of the query, and *Delete whole range* matches the same way
+  instead of missing rows whose stored title had changed.
+- **The session list has pages.** A box above the table picks 50, 100,
+  250, 500 or 1000 rows at a time, with *Previous* / *Next* and a
+  "Page 2 of 3" label, and the line above it counts every session in the
+  range. Only one page is read from `stats.db`, so a long range opens as
+  fast as a short one. 100 rows is the default.
 
 ## Under the hood
 

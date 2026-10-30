@@ -93,15 +93,16 @@ class StatsStore:
             debug_log("stats delete failed: %s" % error)
             return 0
 
-    def delete_range_for(self, day_from, day_to, title):
+    def delete_range_for(self, day_from, day_to, title, vndb_id=None):
         """Delete a single visual novel's sessions inside a range."""
         if not self._conn:
             return 0
+        where, params = self._session_filter(title, vndb_id)
         try:
             with self._lock:
                 cursor = self._conn.execute(
-                    "DELETE FROM sessions WHERE day BETWEEN ? AND ? AND title = ?",
-                    (day_from, day_to, title or ""))
+                    "DELETE FROM sessions WHERE day BETWEEN ? AND ?" + where,
+                    [day_from, day_to] + params)
                 self._conn.commit()
                 return cursor.rowcount
         except Exception as error:
@@ -138,6 +139,36 @@ class StatsStore:
             (day_from, day_to))
         return (rows[0][0], rows[0][1]) if rows else (0.0, 0)
 
+    def seconds_by_game(self):
+        """{key: seconds} over every session ever recorded.
+
+        The key is the VNDB id when there is one, otherwise the title - the same
+        pair a game uses to find its own row on the dashboard.
+        """
+        rows = self._query(
+            "SELECT COALESCE(NULLIF(vndb_id,''), NULLIF(title,'')), SUM(seconds)"
+            " FROM sessions GROUP BY 1")
+        return {row[0]: row[1] for row in rows if row[0]}
+
+    def heal_totals(self, games, slack=0.5):
+        """Raise stored totals that fell behind the session log.
+
+        A crash between two saves used to leave games.json smaller than
+        stats.db, and the total then stayed behind for good. Values are only
+        ever raised by this, so a total typed in by hand is never lowered.
+        """
+        sums = self.seconds_by_game()
+        for game in games:
+            key = (game.get("vndb_id") or "").strip() \
+                or (game.get("original") or game.get("title") or "").strip()
+            recorded = sums.get(key)
+            if recorded is None:
+                continue
+            stored = float(game.get("total_seconds") or 0)
+            if recorded > stored + slack:
+                game["total_seconds"] = float(recorded)
+        return games
+
     def by_day(self, day_from, day_to):
         return self._query(
             "SELECT day, SUM(seconds) FROM sessions WHERE day BETWEEN ? AND ?"
@@ -167,12 +198,54 @@ class StatsStore:
             " GROUP BY title, vndb_id ORDER BY 3 DESC LIMIT ?",
             (day_from, day_to, limit))
 
-    def sessions(self, day_from, day_to, limit=500):
-        return self._query(
-            "SELECT id, day, COALESCE(NULLIF(title,''), exe_name, vndb_id, '?'),"
-            " seconds, start_ts FROM sessions WHERE day BETWEEN ? AND ?"
-            " ORDER BY day DESC, start_ts DESC LIMIT ?",
-            (day_from, day_to, limit))
+    @staticmethod
+    def _session_filter(title, vndb_id):
+        """SQL for "this one visual novel"; empty when the caller wants all.
+
+        Sessions record the title they had when they were written, plus the
+        exe name and the VNDB id, so a game renamed in the library is still
+        found by its id.
+        """
+        clauses = []
+        params = []
+        if title:
+            clauses.append("title = ?")
+            params.append(title)
+            clauses.append(
+                "COALESCE(NULLIF(title,''), exe_name, vndb_id, '?') = ?")
+            params.append(title)
+        if vndb_id:
+            clauses.append("vndb_id = ?")
+            params.append(vndb_id)
+        if not clauses:
+            return "", []
+        return " AND (" + " OR ".join(clauses) + ")", params
+
+    def sessions(self, day_from, day_to, limit=500, title=None, vndb_id=None,
+                 offset=0):
+        """Rows in a range, newest first; `limit=None` means all of them."""
+        sql = ("SELECT id, day, COALESCE(NULLIF(title,''), exe_name, vndb_id, '?'),"
+               " seconds, start_ts FROM sessions WHERE day BETWEEN ? AND ?")
+        params = [day_from, day_to]
+        where, extra = self._session_filter(title, vndb_id)
+        sql += where
+        params += extra
+        sql += " ORDER BY day DESC, start_ts DESC"
+        if limit:
+            sql += " LIMIT ? OFFSET ?"
+            params.append(int(limit))
+            params.append(max(0, int(offset or 0)))
+        return self._query(sql, params)
+
+    def count_sessions(self, day_from, day_to, title=None, vndb_id=None):
+        """How many rows match, so the dialog can say what it left out."""
+        sql = "SELECT COUNT(*) FROM sessions WHERE day BETWEEN ? AND ?"
+        params = [day_from, day_to]
+        where, extra = self._session_filter(title, vndb_id)
+        sql += where
+        params += extra
+        rows = self._query(sql, params)
+        return int(rows[0][0]) if rows else 0
 
     def first_day(self):
         rows = self._query("SELECT MIN(day) FROM sessions")
