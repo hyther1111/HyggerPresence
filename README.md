@@ -4,19 +4,27 @@ Discord Rich Presence for visual novels on Windows. The application watches
 which game is running, publishes a Discord card with the game, developer,
 session time and total playtime, and records playtime per game.
 
-Current release: **2.3.4** — a *Record Time* switch on the Detection page turns
-every clock off in one go: the session, the total, the statistics and the timer
-on the Discord card all stop, and whatever was already recorded is kept. The
-routes card also stays on screen as soon as a game is seen, with just its name
-and the `+` until the first route arrives, the `+` moved up next to the total,
-and *Set current time* became a green button. It builds on 2.3.4, where every
-route carries two numbers — the time spent in it and the playtime reached when
-it ends, each filling the other in — and on 2.3.2, a bug-fix release on top of
-2.3.1: VNDB ratings fetched from the new API are shown on the same 0–10 scale as
-before instead of ten times bigger, the hover texts and the presence text accept
-the `{title}` style variables everywhere (they used to stay literal in the small
-image text), the Detection preview draws the small image and its hover text, and
-the exe is built from a clean environment (about 32 MB instead of 54 MB). It builds on
+Current release: **2.3.5** — the Detection total and the Statistics card print
+the same second. 2.3.4 made both cards paint in one pass, but the two numbers
+came from two ledgers that had already drifted apart (the Statistics refresh
+path banked the running stretch into `stats.db` without adding it to the game's
+total, and Detection counted the unbanked buffer twice), and each side still
+read the clock for itself. 2.3.5 removes all three causes and repairs the
+damaged totals once at startup. It keeps everything from 2.3.4: a *Record Time*
+switch on the Detection page that turns every clock off in one go — the session,
+the total, the statistics and the timer on the Discord card all stop, and
+whatever was already recorded is kept. The routes card was rebuilt as well:
+every route keeps the read order number you give it, routes group into categories
+with their own subtotals, a tick takes one route out of the accumulated time
+without losing it, and a row is moved by dragging it. The card is still there as
+soon as a game is seen, with the `+` on the total line and *Set current time* as
+its blue action. 2.3.2 was a bug-fix release on top of 2.3.1: VNDB ratings
+fetched from the new API are shown
+on the same 0–10 scale as before instead of ten times bigger, the hover texts
+and the presence text accept the `{title}` style variables everywhere (they used
+to stay literal in the small image text), the Detection preview draws the small
+image and its hover text, and the exe is built from a clean environment (about
+32 MB instead of 54 MB). It builds on
 2.3.1, which captures the whole game even while Magpie upscales it, and on 2.3.0:
 a Library that can show covers instead of a list and remembers where the window
 was, a *Last read* column, an *Idle* status that stops the clock after a
@@ -49,11 +57,11 @@ game you are playing, without you touching anything.
   between — and see the time per game, a chart, and every individual session.
 - **Screenshots.** One hotkey saves the game (or Magpie's upscaled picture of it) into one folder per game; the
   gallery browses, searches and opens them.
-- **Routes.** For long games, keep your own list of routes. Each row holds the
-  time spent in that route and the playtime reached when it ends; type either one
-  and the other follows, and a total strip under the list repeats the last
-  number. *Set current time* copies the playtime the app has recorded into the
-  last route, after asking.
+- **Routes.** For long games, keep your own list of routes: a read order number,
+  a category, the time spent in the route and the playtime reached when it ends.
+  Drag a row (or a category heading) to move it, tick the routes that count, and
+  *Set current time* fills the route that comes last in read order with the
+  playtime the app has recorded, after asking.
 - **Launchers.** Japanese games often need a locale emulator (Locale Emulator,
   GalFC) or a custom command; the app can start them that way.
 - **Three languages** — English, Traditional Chinese, Simplified Chinese — and dark
@@ -90,7 +98,7 @@ From source:
 
 ```bash
 git clone https://github.com/hyther1111/HyggerPresence.git
-cd HyggerPresence/HyggerPresence_2.3.4
+cd HyggerPresence/HyggerPresence_2.3.5
 pip install -r requirements.txt
 python main.py
 ```
@@ -123,7 +131,7 @@ needed to reproduce it:
 
 ```bat
 python -m venv buildenv
-buildenv\Scripts\pip install -r HyggerPresence_2.3.4\requirements.txt pyinstaller
+buildenv\Scripts\pip install -r HyggerPresence_2.3.5\requirements.txt pyinstaller
 buildenv\Scripts\python -m PyInstaller --noconfirm --clean HyggerPresence.spec
 ```
 
@@ -158,16 +166,39 @@ each part, chapter or ending. A game can therefore carry a list of **routes**, a
 the time in each one is typed in by hand:
 
 - The Detection page has a **Routes** card that is there as soon as a game is
-  seen: with no route yet it shows only its name and the **+**, and the *Route
-  time* / *Accumulative* columns appear with the first row. Press **+** (it sits
-  on the total line) and a row appears with a name field, a time field and a red
-  bin; the time is saved when the field loses focus.
-- The card closes with the total and a green **Set current time** button, which
-  copies the playtime the app has recorded into the last route.
+  seen. Press **+** (it sits on the total line) and a row appears: read order
+  number, name, category, route time, accumulated playtime, a tick and a red bin.
+  A time is saved when the field loses focus.
+- **Read order.** `+` gives the new row the highest number in the card plus one,
+  and the field can be typed over. The numbers belong to you: nothing renumbers on
+  its own, so adding a route at the top does not shift the others and deleting one
+  leaves the rest alone. Two routes may share a number — both are outlined in red,
+  and a note says so — because two branches read at the same time are one step of
+  the read order, not a typo. A number is a label, not a position: rows move by
+  dragging.
+- **Categories.** Type a category into a row — the box offers the ones already in
+  use and *New category…*, which asks for a name — and the card groups itself: a
+  heading per category, its routes under it, and that category's time beside the
+  name. Routes without a category sit under *No category*.
+- **Dragging.** The grip on the left of a row (or the row itself) moves it; the
+  row takes the category of the row it lands on, and dropping it at the end of a
+  category keeps it in that category. A category heading is a grip too: dragging
+  it moves the whole group.
+- **The tick.** A route without a tick keeps its own time but is left out of the
+  *Accumulative* column and out of *Total counted* — for a route that is not
+  finished yet, or one replayed out of order that must not be counted twice.
+- **Accumulative** is the sum of the counted routes up to that row in read order,
+  so a route numbered 3 that ends a chapter shows the total up to 3 wherever it
+  sits in the list; two routes with the same number keep the order they appear in.
+  Typing an accumulative time sets the route time to the difference to the route
+  before it in read order, and typing a route time sets its accumulative time.
 - Times are typed as `1h 30m`, `1:30` or `90`. The bin removes the route and its
-  time (with a confirmation).
-- The same list is in Library → Edit → **Routes**, so a game can be filled in
-  before or after it is played. Both places edit the same data.
+  time, with a confirmation.
+- The card closes with **Total counted** and a blue **Set current time**, which
+  fills the route that comes last in read order with the playtime the app has
+  recorded (it asks first).
+- The same list is in Library → Edit → **Routes**, on a scrollable page, so a game
+  can be filled in before or after it is played. Both places edit the same data.
 - Route times stay with the game in `games.json`. Hygger Presence never guesses
   where a chapter boundary is, route time is not taken from the session clock,
   nothing about routes is sent to Discord — the card keeps showing the whole
@@ -303,7 +334,7 @@ Examples:
 ## Project layout
 
 ```
-HyggerPresence_2.3.4/          current sources (older versions: Old versions/)
+HyggerPresence_2.3.5/          current sources (2.3.4 and older: Old versions/)
   main.py            entry point (QApplication, tray)
   hp2/
     core.py          constants, time formatting, debug log

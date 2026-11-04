@@ -187,6 +187,26 @@ class StatsStore:
             "SELECT substr(day,1,7) AS m, SUM(seconds) FROM sessions"
             " WHERE day BETWEEN ? AND ? GROUP BY m ORDER BY m", (day_from, day_to))
 
+    def sum_seconds(self, title, vndb_id):
+        """Everything stats.db holds for one visual novel, over every day.
+
+        Keyed the way add() stored the row (title, vndb_id) - the same key
+        by_game groups on, so a repair that uses this number lands exactly on
+        the figure the Statistics card shows.
+        """
+        if not self._conn:
+            return None
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COALESCE(SUM(seconds), 0) FROM sessions"
+                    " WHERE title = ? AND vndb_id = ?",
+                    (title or "", vndb_id or "")).fetchone()
+        except Exception as error:
+            debug_log("stats sum_seconds failed: %s" % error)
+            return None
+        return float((row[0] if row else 0) or 0.0)
+
     def by_game(self, day_from, day_to, limit=60):
         # Grouped by title + VNDB id, not by exe: the same visual novel often
         # ships several exes (patched, uncensored, voice-fixed), and one card per

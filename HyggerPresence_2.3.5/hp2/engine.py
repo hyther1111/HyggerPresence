@@ -27,6 +27,12 @@ KEEPALIVE = 20.0            # Discord allows 5 updates / 20 s; 3 of them as keep
 # own exe, or a slow Toolhelp snapshot, is back a moment later, and clearing on
 # the first miss made the Discord card vanish for no reason.
 MISSING_GRACE = 2.0
+# Startup repairs a total that fell behind stats.db, but a card handover can add
+# a fraction *after* that repair (the old process writes its last second while
+# the new one has already healed), which left the two displays up to a second
+# apart for the rest of the session. Idle ticks retry the fold, so it closes in
+# minutes instead of waiting for the next launch.
+HEAL_EVERY = 300.0
 MIN_PUSH_INTERVAL = 0.8        # floor between two sends
 PUSH_BURST = 5                 # Discord allows 5 updates ...
 PUSH_WINDOW = 20.0             # ... per 20 s, so allow exactly that             # 1.0.3 pushed every 55 s; Discord allows 5 per 20 s
@@ -112,6 +118,7 @@ class Engine(DetectorMixin):
         self._vndb_retry_at = {}
         self._stat_buffer = 0.0          # seconds not yet written (short stretches)
         self._stat_buffer_game = None
+        self._last_heal = 0.0           # last idle repair pass (see _maybe_heal)
         self._pushed_identity = None    # (exe, vndb_id) of the last presence push
         self._pushed_status = None      # status that actually reached Discord
         self._status_candidate = None   # (status, since) waiting to be stable
@@ -241,42 +248,71 @@ class Engine(DetectorMixin):
         if presence is not None:
             self._close_async(presence)
 
-    def live_total(self, now=None):
-        """Played seconds for the current game, including what stats.db has not got.
+    def _open_seconds(self, now, status=None):
+        """The part of the running stretch that is still unbanked.
 
-        The Detection card and the Statistics card have to show one number: the
-        rows in stats.db plus the pending part (the buffer that waits for a
-        write and the open stretch). Counting only the open stretch here left
-        the buffer out, and the two cards drifted by a second or two.
+        Zero when the clock is stopped: Paused, Idle and Record Time off all
+        leave _reading_start at None, so every caller gets the same answer.
+        """
+        if self._reading_start is None:
+            return 0.0
+        if (self.status if status is None else status) == "Idle":
+            from .winapi import get_idle_seconds
+            return max(0.0, (now - get_idle_seconds()) - self._reading_start)
+        return max(0.0, now - self._reading_start)
+
+    def sample_clock(self, now=None):
+        """Stamp the session and the total from one time sample (2.3.5).
+
+        Detection and Statistics are both painted from these two values, so
+        the sample has to live here. While each side called time.time() for
+        itself, two calls a few milliseconds apart could sit on different
+        sides of a whole second and the cards showed 11 s against 12 s for
+        exactly the same playtime. Returns the sample it used so the caller
+        can hand it to the next label instead of sampling again.
+        """
+        if now is None:
+            now = time.time()
+        game = self.game
+        if game is None:
+            return now
+        current = self._open_seconds(now)
+        self.session_seconds = self._session_accumulated + current
+        # No _stat_buffer here: those seconds are already inside the game's
+        # total (they are banked into both at the same moment, see
+        # _apply_clock) and only stats.db is still missing them. Adding them
+        # twice made Detection run ahead of the Statistics card by up to 5 s.
+        self.total_seconds = (float(game.get("total_seconds", 0) or 0.0) + current)
+        return now
+
+    def live_total(self, now=None):
+        """Played seconds for the current game: the total plus the open stretch.
+
+        Deliberately *not* the buffer too. The buffer holds seconds that are
+        already counted in game["total_seconds"] and are only waiting for
+        stats.db, so the Statistics side adds it (pending_seconds) and this
+        side does not - that is what makes the two cards show one number.
         """
         game = self.game
         if game is None:
             return float(self.total_seconds or 0.0)
-        buffered = self._stat_buffer if self._stat_buffer_game is game else 0.0
-        current = 0.0
-        if self._reading_start is not None:
-            if now is None:
-                now = time.time()
-            if self.status == "Idle":
-                from .winapi import get_idle_seconds
-                current = max(0.0, (now - get_idle_seconds()) - self._reading_start)
-            else:
-                current = max(0.0, now - self._reading_start)
-        return float(game.get("total_seconds", 0) or 0.0) + buffered + current
-
-    def pending_seconds(self):
-        """Seconds that are not in stats.db yet: the buffer plus the open segment."""
-        total = self._stat_buffer
-        game = self._stat_buffer_game
-        if self._reading_start is not None:
+        if now is None:
             now = time.time()
-            if self.status == "Idle":
-                from .winapi import get_idle_seconds
-                total += max(0.0, (now - get_idle_seconds()) - self._reading_start)
-            else:
-                total += max(0.0, now - self._reading_start)
-            if game is None:
-                game = self.game
+        return (float(game.get("total_seconds", 0) or 0.0)
+                + self._open_seconds(now))
+
+    def pending_seconds(self, now=None):
+        """Seconds that are not in stats.db yet: the buffer plus the open segment.
+
+        `now` is the sample the Detection total was stamped with; passing it
+        along is what keeps the two cards on the same second.
+        """
+        if now is None:
+            now = time.time()
+        total = self._stat_buffer + self._open_seconds(now)
+        game = self._stat_buffer_game
+        if game is None and self._reading_start is not None:
+            game = self.game
         return total, game
 
     def clear_now(self):
@@ -893,6 +929,12 @@ class Engine(DetectorMixin):
     # A route is a named bucket of playtime inside one game, and the time in it
     # is typed by hand: the app never guesses where a chapter ends. Nothing here
     # touches the session clock, the Discord card or stats.db.
+    #
+    # 2.3.6 gives a route three more bits of bookkeeping. "order" is the read
+    # order the player types: the accumulative column walks it, not the order of
+    # the list, so the list can be grouped by category and still mean something.
+    # "count" says whether the route's time belongs in that column and in the
+    # total, and "category" files the row under a group the editor adds up.
     def _routes(self, game):
         """The game's route list, created on first use."""
         routes = game.get("routes")
@@ -920,25 +962,48 @@ class Engine(DetectorMixin):
         except Exception as error:
             debug_log("games save failed: %s" % error)
 
-    def routes(self, game):
-        """The game's routes as plain dicts, for the tables in the UI.
+    @staticmethod
+    def _route_order(entry, fallback):
+        try:
+            order = int(entry.get("order"))
+        except (TypeError, ValueError):
+            return fallback
+        return order if order > 0 else fallback
 
-        Every entry carries the time spent in that route ("seconds") and the
-        playtime reached when the route ends ("acc"). Old games.json files only
-        know "seconds", so the running total is rebuilt from them on the fly.
+    def routes(self, game):
+        """The game's routes as plain dicts, in read order, for the editor.
+
+        Every entry carries the time spent in that route ("seconds"), the
+        playtime reached when it ends ("acc"), its read "order", whether it
+        "counts" and its "category". "acc" is a running sum of the routes that
+        count, walked in read order: the numbers the player typed decide, and
+        the position in the list only breaks a tie between two routes that share
+        one. A route that is switched off leaves the figure exactly where the
+        route before it left it.
         """
         if not game:
             return []
         rows = []
-        acc = 0.0
-        for entry in self._routes(game):
+        for index, entry in enumerate(self._routes(game)):
             name = (entry.get("name") or "").strip()
             if not name:
                 continue
-            seconds = max(0.0, float(entry.get("seconds") or 0.0))
-            stored = entry.get("acc_seconds")
-            acc = max(acc, float(stored)) if stored is not None else acc + seconds
-            rows.append({"name": name, "seconds": seconds, "acc": acc})
+            rows.append({
+                "name": name,
+                "seconds": max(0.0, float(entry.get("seconds") or 0.0)),
+                "order": self._route_order(entry, index + 1),
+                "count": bool(entry.get("count", True)),
+                "category": (entry.get("category") or "").strip(),
+            })
+        # the numbers are the read order; the list position (the order the
+        # editor shows) only decides between two routes that share a number
+        sequence = sorted(range(len(rows)),
+                          key=lambda index: (rows[index]["order"], index))
+        acc = 0.0
+        for index in sequence:
+            if rows[index]["count"]:
+                acc += rows[index]["seconds"]
+            rows[index]["acc"] = acc
         return rows
 
     def route_names(self, game):
@@ -952,19 +1017,28 @@ class Engine(DetectorMixin):
 
     def route_total(self, game):
         rows = self.routes(game)
-        return rows[-1]["acc"] if rows else 0.0
+        return max(row["acc"] for row in rows) if rows else 0.0
 
-    def add_route(self, game, name, seconds=0.0, acc=None):
+    def add_route(self, game, name, seconds=0.0, acc=None, order=None,
+                  count=True, category=""):
         name = (name or "").strip()
         if not game or not name or self._route_entry(game, name) is not None:
             return False
         rows = self.routes(game)
         seconds = max(0.0, float(seconds or 0.0))
-        if acc is None:
-            acc = (rows[-1]["acc"] if rows else 0.0) + seconds
         entry = self._route_entry(game, name, create=True)
         entry["seconds"] = seconds
+        if acc is None:
+            acc = (max(row["acc"] for row in rows) if rows else 0.0) + seconds
         entry["acc_seconds"] = max(0.0, float(acc))
+        if order is None:
+            order = (max(row["order"] for row in rows) + 1) if rows else 1
+        try:
+            entry["order"] = max(1, int(order))
+        except (TypeError, ValueError):
+            entry["order"] = (max(row["order"] for row in rows) + 1) if rows else 1
+        entry["count"] = bool(count)
+        entry["category"] = (category or "").strip()
         self.save_games_now()
         return True
 
@@ -987,19 +1061,25 @@ class Engine(DetectorMixin):
         return True
 
     def set_all_routes(self, game, rows):
-        """Rewrite the whole route list, in display order.
+        """Rewrite the whole route list, in read order.
 
-        rows is [(name, seconds, acc)]. The editor hands its rows over after
-        every edit, so the running total stays consistent even when a route in
-        the middle changes.
+        rows is [(name, seconds, acc)] or [(name, seconds, acc, count,
+        category, order)]; the editor hands its rows over after every edit, so
+        the running total stays consistent even when a route in the middle
+        changes. A row that only carries three values keeps the count, category
+        and order it already had, which is what the older callers (and the
+        probes) send. When no row carries an order the list itself is the read
+        order: entry i becomes order i+1. Rows that do carry one keep it as
+        typed, duplicates included: two routes may share a number and the
+        editor flags it instead of quietly renumbering the list.
         """
         if not game:
             return False
         entries = self._routes(game)
         by_name = {(entry.get("name") or ""): entry for entry in entries}
         wanted = []
-        for name, seconds, acc in rows:
-            name = (name or "").strip()
+        for row in rows:
+            name = (row[0] or "").strip()
             if not name:
                 continue
             if any(other["name"] == name for other in wanted):
@@ -1009,25 +1089,29 @@ class Engine(DetectorMixin):
                 entry = {"name": name}
                 by_name[name] = entry
             entry["name"] = name
-            entry["seconds"] = max(0.0, float(seconds or 0.0))
-            entry["acc_seconds"] = max(0.0, float(acc or 0.0))
+            entry["seconds"] = max(0.0, float(row[1] or 0.0))
+            entry["acc_seconds"] = max(0.0, float(row[2] or 0.0))
+            if len(row) > 3:
+                entry["count"] = bool(row[3])
+            else:
+                entry.setdefault("count", True)
+            if len(row) > 4:
+                entry["category"] = (row[4] or "").strip()
+            else:
+                entry.setdefault("category", "")
+            if len(row) > 5:
+                try:
+                    entry["order"] = max(1, int(row[5]))
+                except (TypeError, ValueError):
+                    pass
             wanted.append(entry)
+        if not any(len(row) > 5 for row in rows):
+            # no explicit order was sent: the list is the read order
+            for position, entry in enumerate(wanted):
+                entry["order"] = position + 1
         entries[:] = wanted
         self.save_games_now()
         return True
-
-    def remove_route(self, game, name):
-        name = (name or "").strip()
-        if not game or not name:
-            return False
-        routes = self._routes(game)
-        for index, entry in enumerate(routes):
-            if (entry.get("name") or "") == name:
-                del routes[index]
-                self.save_games_now()
-                return True
-        return False
-
     # ----------------------------------------------------------------- tick
     def tick(self):
         """Re-entrancy guard: the focus hook and the UI timer share this."""
@@ -1066,9 +1150,23 @@ class Engine(DetectorMixin):
         finally:
             self._watchdog_busy = False
 
+    def _maybe_heal(self):
+        """Fold a leftover gap while the tracker is idle, not only at startup."""
+        if self._reading_start is not None or self._stat_buffer:
+            return                      # a live reading owns the numbers
+        now = time.time()
+        if now - self._last_heal < HEAL_EVERY:
+            return
+        self._last_heal = now
+        try:
+            self.repair_leaked_totals()
+        except Exception as exc:
+            debug_log("idle heal failed: %r" % (exc,))
+
     def _tick_once(self):
         try:
             self._expire_sessions(time.time())
+            self._maybe_heal()
             game, pids = self.scan()
             if not game or not pids or not self._pids_alive(pids):
                 if self.game is not None:
@@ -1130,10 +1228,10 @@ class Engine(DetectorMixin):
             self._missing_since = None      # the game is back, cancel the wait
             self._apply_clock(game, status, now)
             self._arm_exit_watch(game, pids)
-            current = (now - self._reading_start) if self._reading_start else 0.0
+            current = self._open_seconds(now, status)
             self.session_seconds = self._session_accumulated + current
-            buffered = self._stat_buffer if self._stat_buffer_game is game else 0.0
-            self.total_seconds = game.get("total_seconds", 0) + buffered + current
+            self.total_seconds = (float(game.get("total_seconds", 0) or 0.0)
+                                  + current)
             self.game = game
             identity = (game.get("exe"), game.get("vndb_id"))
             # A status change has to survive a moment before it reaches Discord:
@@ -1394,15 +1492,99 @@ class Engine(DetectorMixin):
         return enabled
 
     def flush_open_segment(self):
-        """Write the Running segment to stats.db without stopping the clock."""
+        """Write the Running segment to stats.db without stopping the clock.
+
+        Returns the sample it banked at, so the caller can paint both cards from
+        that instant instead of taking a second sample of its own.
+        """
         if self._reading_start is None or not self.game:
-            return
+            return None
         now = time.time()
         start = self._reading_start
         segment = max(0.0, now - start)
         self._reading_start = now
         self._session_accumulated += segment
+        # 2.3.5: the same seconds have to reach the game's total as well. They
+        # went into stats.db and into the session but not into the total, so
+        # every "Refresh" of the Statistics page while reading pushed that card
+        # ahead of Detection *for good* (0.2-0.8 s per game in this library,
+        # which is exactly enough to flip the displayed second).
+        self.game["total_seconds"] = (float(self.game.get("total_seconds", 0) or 0.0)
+                                      + segment)
+        self.total_seconds = self.live_total(now)
         self._record_segment(self.game, start, now)
+        if self.on_save:
+            try:
+                self.on_save()
+            except Exception:
+                pass
+        return now
+
+    def repair_leaked_totals(self, limit=5.0):
+        """Make the two ledgers agree again, without ever deleting time.
+
+        Two ways they can drift by the size of one buffer:
+
+        - `stats.db` ahead: 2.3.4's Statistics refresh banked a stretch into the
+          database and not into the total. Those seconds are given to the total.
+        - the total ahead: a last stretch shorter than the 5 s buffer never
+          reached the database because the process ended first. The missing row
+          is written to `stats.db`.
+
+        Only gaps up to `limit` seconds in either direction are touched. A
+        bigger difference is a real disagreement and is left alone on purpose:
+
+        - a total *bigger* than stats.db by a lot is normal for anyone who
+          played before the Statistics page existed - those hours were never in
+          the database and must never be taken away (this library has two such
+          titles),
+        - rows written under an older title, or a hand-edited total, belong to
+          Library -> Sync totals, not to a silent repair here.
+        """
+        if self.stats is None or not hasattr(self.stats, "sum_seconds"):
+            return False
+        fixed = []
+        recovered = []
+        for game in list(self.games or []):
+            if not isinstance(game, dict):
+                continue
+            title = game.get("original") or game.get("title") or ""
+            stored = float(game.get("total_seconds", 0) or 0.0)
+            recorded = self.stats.sum_seconds(title, game.get("vndb_id") or "")
+            if recorded is None:
+                continue
+            gap = recorded - stored
+            if 0.0 < gap <= limit:
+                game["total_seconds"] = stored + gap
+                fixed.append((game.get("title") or game.get("exe"), gap))
+            elif recorded > 0.0 and -limit <= gap < 0.0:
+                # the other direction: the clock counted a last stretch shorter
+                # than the 5 s buffer and the process ended before it reached
+                # stats.db. The total already holds those seconds, so write the
+                # missing row instead of lowering the total - a total is never
+                # reduced. `recorded > 0` keeps titles played before the
+                # Statistics page existed (no rows at all) out of this.
+                now = time.time()
+                try:
+                    self.stats.add(game.get("vndb_id") or "", title,
+                                   Path(game.get("exe", "")).name,
+                                   now + gap, now, -gap, min_seconds=0)
+                except Exception:
+                    continue
+                recovered.append((game.get("title") or game.get("exe"), -gap))
+        if fixed:
+            try:
+                debug_log("totals repaired from stats.db: %s"
+                          % ", ".join("%s +%.2fs" % (name, gap) for name, gap in fixed))
+            except Exception:
+                pass
+        if recovered:
+            try:
+                debug_log("stats.db completed from totals: %s"
+                          % ", ".join("%s +%.2fs" % (name, gap) for name, gap in recovered))
+            except Exception:
+                pass
+        return bool(fixed or recovered)
 
     # ------------------------------------------------------- exit waiters
     def _arm_exit_watch(self, game, pids):
@@ -1584,6 +1766,20 @@ class Engine(DetectorMixin):
         self._hook_thread = None
 
     def close(self):
+        # 2.3.5: the last seconds of a session sit in _stat_buffer, which only
+        # reaches stats.db once it holds 5 s. Quitting used to leave that tail
+        # inside the total and outside the database, so the clock and the
+        # Statistics page drifted apart by up to 5 s - enough to print a
+        # different second, and it came back after every restart.
+        try:
+            self._flush()
+            self._write_buffer(time.time())
+            # the flush above adds the tail to the total in memory and writes the
+            # same seconds to stats.db; without the save the database would end
+            # up ahead of games.json by exactly that tail
+            self.save_games_now()
+        except Exception:
+            pass
         try:
             self._rpc_stop.set()
         except Exception:

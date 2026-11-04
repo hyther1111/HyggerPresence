@@ -1,5 +1,152 @@
 # Changelog
 
+## 2.3.5 - 2026-11-04
+
+**In short:** Detection and Statistics now print the same second, and this time
+the fix is in the numbers rather than in the timers. 2.3.4 made both cards paint
+in one pass but left two ledgers behind them: `stats.db` and the game's stored
+total were already a fraction of a second apart, and the pass still sampled the
+clock twice. The three causes below are all fixed, and totals that 2.3.4 damaged
+are folded back to the figure `stats.db` holds.
+
+**The routes card was rebuilt as well.** It is no longer a table that renumbers
+itself: every route carries the read order *you* give it, routes group into
+categories with their own subtotals, a tick takes one route out of the
+accumulated time without losing it, and a route is moved by dragging it. The
+numbers you see are now the numbers that are stored.
+
+### Added
+- **The read order is the player's number.** Every route carries an *order*
+  number: `+` gives the new row the highest number in the card plus one, the
+  field can be typed over, and nothing renumbers on its own — adding a route at
+  the top does not shift the others, and deleting a row leaves the numbers of the
+  rest alone. Two routes may share a number: both are drawn with a red outline
+  and a note says what happened, because two branches that are read at the same
+  time are one step of the read order, not a typo the app should "fix". The rule
+  behind it is in `commit_order()`: "the numbers belong to the player".
+- **Categories.** Each row has a *Category* box holding the categories already in
+  use plus *New category…* (it asks for a name, then files the route there). The
+  card groups itself under a heading per category, in the order the categories
+  first appear in the list, with that category's time next to its name; routes
+  without a category are collected under *No category*.
+- **A tick per route.** The checkbox on the right takes that route out of the
+  *Accumulative* column and out of the total, and keeps its own time: it is for
+  the route that is not finished yet, or one replayed out of order that must not
+  be counted twice. The bottom line is called *Total counted* for that reason.
+- **Drag to move.** The grip on the left of a route moves that route; it follows
+  the list while dragging and takes the category of the row it lands on. A
+  category heading is a grip too: dragging it moves the whole group.
+
+### Changed
+- **Renumbering is gone.** 2.3.4 renumbered every row below an edit ("rows below
+  are renumbered, so a change in the middle never leaves a broken total"), which
+  made the number you typed different from the number you saw afterwards. The
+  stored order is now exactly what is on screen, and a route is moved by dragging
+  it, not by renaming a number.
+- **Accumulative follows the read order, not the row order.** A route's
+  *Accumulative* is the sum of the counted routes up to it **in number order**,
+  so a route numbered 3 that ends a chapter shows the total up to 3 even when it
+  sits further down the list. Two routes with the same number keep the order in
+  which they appear (`_sequence()` sorts on `(order, position)`). *Route time*
+  still fills *Accumulative* in, and typing an accumulative time still sets the
+  route time to the difference to the route before it in read order.
+- **The card no longer rebuilds itself on every edit.** Typing a name, a time, a
+  number or a category repaints the row in place; the focused field keeps its
+  focus and the card no longer flashes white while it happens.
+- **The `+` joins the category of the last row** instead of always appending an
+  uncategorised route at the bottom.
+- **The card is a scrollable page in the game editor**, so a game with thirty
+  routes no longer stretches *Library → Edit* past the screen.
+
+### Fixed
+- **Clicking a second row duplicated the first one.** Every refresh used to
+  destroy and recreate the row widgets, so a click that arrived between the two
+  halves landed on a widget that was about to be deleted and left a duplicate
+  behind (it disappeared on restart because nothing on disk had changed). Rows
+  are now reused and only their fields are updated, so there is no window in
+  which a click can land on a dead row.
+- **A category could be changed by scrolling over its box.** The box now ignores
+  the wheel (`_RouteCombo.wheelEvent` calls `event.ignore()`), so scrolling the
+  card never rewrites a category by accident.
+- **Dropping a route at the end of a category put it in the next one.** The drop
+  test only looked at route rows, so a pointer just below the last row of a group
+  was past every row and fell into the following group; the bands now include the
+  category headings, and a drop at the tail stays in its category.
+- **Editing one route could reset the read order of the others**, the flip side
+  of the renumbering above: 2.3.4's pass rewrote every number after an edit, so
+  fixing a typo in the middle of the list shuffled the numbers below it.
+- **The two cards were computed from two ledgers that had drifted apart.**
+  `engine.flush_open_segment()` — the "write the running stretch now" path the
+  Statistics page uses when you press Refresh while reading — inserted the whole
+  open stretch into `stats.db` and added it to the session, but never added it to
+  `game["total_seconds"]`. Statistics was therefore ahead by that stretch *for
+  good*, and no timer work could ever close the gap. Measured in this library:
+  `てんぷれっ!!` 23232.002 s in `stats.db` against 23231.247 s in `games.json` —
+  0.756 s, which is exactly what turned `6h 27m 11s` into `6h 27m 12s` on the
+  screenshot. `DESIRE` carried 0.231 s and `Cinderella` 0.174 s of the same
+  debt. `flush_open_segment()` now banks the seconds into the total as well, and
+  saves.
+- **Detection counted the unbanked buffer twice.** `game["total_seconds"]` already
+  contains the seconds sitting in `_stat_buffer` (they go into both at the same
+  moment, in `_apply_clock`), but the Detection total added the buffer on top of
+  it again while `stats.db` had not been written yet — up to five seconds in the
+  other direction, which is the other half of the "sometimes ahead, sometimes
+  behind" reports. The total is now `game["total_seconds"]` plus the open
+  stretch only; the buffer is added on the `stats.db` side, where it belongs.
+- **One sample per second, not three.** 2.3.4 merged the two *timers* but not the
+  two *samplings*: the tick stamped the total from its own `time.time()`, the
+  clock timer sampled again, and `pending_seconds()` sampled a third time. Two
+  numbers a few milliseconds apart are still the same number until
+  `format_time()` truncates them, and whichever sample came first lost a second.
+  - `engine.sample_clock(now)` stamps the session and the total from one sample,
+    and `_open_seconds()` is the single place that computes the unbanked stretch,
+    so the tick, the Detection card and the Statistics card cannot disagree.
+  - `MainWindow._paint_live()` is the only painter: the detection tick and the
+    clock timer both call it, a per-second stamp decides which one does the work,
+    and the sample is passed down through `StatsPage.refresh_now(now)` →
+    `_live_segment(..., now)` → `pending_seconds(now)`.
+  - Switching to the Statistics page paints it in that same pass instead of
+    taking a sample of its own.
+- **Quitting no longer leaves seconds behind.** The last stretch of a session
+  waits in `_stat_buffer` until it holds 5 s, and `Engine.close()` used to tear
+  the process down without writing it: those seconds stayed in the total and
+  never reached `stats.db`, so every quit with less than 5 s pending widened the
+  gap by that tail. In the live library a 1.23 s tail was sitting there, which
+  is what put `6h 27m 30s` next to `6h 27m 29s` after the first repair.
+  `close()` now flushes the running stretch and the buffer before it stops.
+- **Damage in either direction is repaired once, on startup.**
+  `engine.repair_leaked_totals()` compares each game with `stats.db` and fixes
+  gaps of one buffer's size, never deleting time: `stats.db` ahead
+  (`0 < gap <= 5 s`) is folded back into the total, and a total ahead by up to
+  5 s is completed by writing the missing row. Anything bigger is a real
+  disagreement between the two ledgers — a game renamed after its rows were
+  written, or a hand-edited total — and is deliberately left to
+  *Library → Sync totals*, so nothing is invented. A total far above `stats.db`
+  is the normal shape for time played before the Statistics page existed: those
+  hours were never in the database and are never taken away (two titles in this
+  library have them), and a title with no rows at all is never touched.
+- **Editing a game no longer shaves its total.** *Library → Edit game* rewrote
+  `total_seconds` through `parse_time_input()` on every OK, and that parser only
+  understands whole seconds: opening the dialog to fix a title and pressing OK
+  cut up to a second off a total that `stats.db` still held to the millisecond,
+  which put the two displays a second apart again. It is what happened to
+  `てんぷれっ!!` at 05:27 — `games.json` fell back to `34637` while `stats.db`
+  stayed at `34637.900`. The field is now written only when its text changed.
+- **A leftover gap is folded while idle, not only at startup.** A card handover
+  races: the old process writes its last second *after* the new one has already
+  repaired, so up to a second can appear after the startup pass and stay for the
+  rest of the session. `engine._maybe_heal()` repeats the same repair every five
+  minutes while nothing is being tracked, so the gap closes in minutes.
+- **The status bar could keep an older number than the Statistics card.** The
+  Detection card and the status bar were only repainted through the clock timer
+  while the Detection page was the visible one. The single pass now repaints them
+  whether or not that page is on screen.
+
+A headless test (`_devtools/_test_clock_235.py`) drives the real engine and the
+real `stats.db` over every millisecond of a second and fails if the two cards
+differ, if a flush moves them, if a quit drops the pending tail, or if the
+repair touches a real disagreement or a title played before Statistics existed.
+
 ## 2.3.4 - 2026-10-30
 
 **In short:** route times can be typed two ways. Every route shows the time spent

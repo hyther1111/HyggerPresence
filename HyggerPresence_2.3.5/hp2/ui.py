@@ -19,15 +19,17 @@ from pathlib import Path
 
 from PySide6.QtCore import (QDate, QEasingCurve, QEvent, QObject,
                             QPoint, QPointF, QPropertyAnimation, QRect, QRectF,
-                            QSize, QSizeF, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QIcon, QImage, QLinearGradient, QPainter,
-                           QPainterPath, QPen, QPixmap)
+                            QSize, QSizeF, Qt, QTimer, QStringListModel, Signal)
+from PySide6.QtGui import (QColor, QIcon, QImage, QIntValidator,
+                           QLinearGradient, QPainter, QPainterPath, QPalette,
+                           QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QScrollArea,
                                QButtonGroup, QComboBox, QDialog, QFrame,
-                               QGridLayout,
+                               QCompleter, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLayout,
-                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QInputDialog, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu,
                                QMainWindow, QMessageBox, QProgressBar,
                                QPushButton, QSizeGrip, QSizePolicy, QSpinBox,
                                QStackedWidget, QStyle, QTableWidget,
@@ -356,8 +358,24 @@ QComboBox QAbstractItemView::item:selected {{ background: {p['accent']};
     /* a route row has no surface of its own: it must blend into the card so no
        darker band is left between the fields */
     QFrame#routerow {{ background: transparent; border: none; }}
+    /* the row that is being dragged is lifted out of the list */
+    QFrame#routerow[dragging="true"] {{ background: rgba(77, 141, 240, 0.16);
+               border-radius: 7px; }}
+    /* a read order another route already claims: red, so it is not a silent fix */
+    QLineEdit#routeorder {{ padding: 0 2px; font-weight: 600; }}
+    QLineEdit#routeorder[duplicate="true"] {{ color: #ef4444; border-color: #ef4444; }}
+    QComboBox#routecat {{ font-size: 8pt; padding: 2px 10px 2px 6px; }}
+    /* the routes page scrolls inside the dialog without drawing a band of its own */
+    QScrollArea#routescroll {{ background: transparent; border: none; }}
+    QScrollArea#routescroll > QWidget > QWidget {{ background: transparent; }}
     /* the caption line and the total line sit on the card itself, not on a band */
-    QWidget#routeshead, QWidget#routestotal {{ background: transparent; }}
+    QWidget#routeshead, QWidget#routestotal, QWidget#routegroup,
+    QWidget#routesbody {{ background: transparent; }}
+    /* a heading is the handle of its group: it lifts while dragged and shows
+       where the group is going to land */
+    QWidget#routegroup[dragging="true"] QLabel#caps {{ color: {p['accent']}; }}
+    QWidget#routegroup[dropbefore="true"] QLabel#caps {{ color: {p['accent']}; }}
+    QWidget#routegroup[dropbefore="true"] {{ border-top: 2px solid {p['accent']}; }}
     QWidget#previewtimer {{ background: transparent; }}
     QWidget#pvthumb {{ background: transparent; }}
     QLabel#totalvalue {{ color: {p['text']}; font-size: 13px; font-weight: 600; }}
@@ -2494,7 +2512,7 @@ def menu_qss(window):
     values = dict(getattr(window, "palette", None) or {})
     values.setdefault("menuarrow", menu_arrow_icon_path())
     return MENU_QSS % values
-APP_VERSION = "2.3.4"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.3.5"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -3130,26 +3148,32 @@ class StatsPage(Page):
             return
         return self._refresh_body(flush)
 
-    def refresh_now(self):
-        """Paint the page from the clock tick that also paints Detection."""
+    def refresh_now(self, now=None):
+        """Paint the page from the clock tick that also paints Detection.
+
+        `now` is that tick's time sample: reusing it is what puts this card and
+        Detection's total on the same second (2.3.5).
+        """
         if not self.isVisible():
             return
-        return self._refresh_body(False)
+        return self._refresh_body(False, now)
 
-    def _refresh_body(self, flush=False):
+    def _refresh_body(self, flush=False, now=None):
         from .core import format_time
         if flush:
             try:
-                self.engine.flush_open_segment()
+                # the flush banks everything at one instant: paint from that
+                # instant instead of sampling the clock again
+                now = self.engine.flush_open_segment()
             except Exception:
-                pass
+                now = None
         start, end = self._range()
         day_from, day_to = start.isoformat(), end.isoformat()
         stats = getattr(self.app, "stats", None)
         seconds, sessions = stats.total(day_from, day_to) if stats else (0, 0)
         rows = stats.by_game(day_from, day_to) if stats else []
         # the segment being read right now is not in the database yet
-        live, live_game = self._live_segment(start, end)
+        live, live_game = self._live_segment(start, end, now)
         seconds += live
         if live and live_game is not None:
             rows = self._add_live(rows, live_game, live)
@@ -3263,12 +3287,12 @@ class StatsPage(Page):
         QMessageBox.information(self, "Export CSV",
                                 "Exported %d session(s) to:\n%s" % (len(rows), path))
 
-    def _live_segment(self, start, end):
+    def _live_segment(self, start, end, now=None):
         """Pending seconds (buffer + open segment) so the total never drops."""
         engine = self.engine
         if not hasattr(engine, "pending_seconds"):
             return 0.0, None
-        pending, game = engine.pending_seconds()
+        pending, game = engine.pending_seconds(now)
         if pending <= 0.0 or game is None:
             return 0.0, None
         from datetime import date
@@ -5903,6 +5927,7 @@ class HotkeyDialog(QDialog):
         super().keyReleaseEvent(event)
 
 
+# ------------------------------------------------------------------ routes
 def parse_route_time(text):
     """Read a typed duration exactly like the library's Total time field.
 
@@ -5916,54 +5941,207 @@ def parse_route_time(text):
     return float(parse_time_input(text))
 
 
-class RouteRow(QFrame):
-    """One route: its name, the time spent in it and the total so far."""
+def _polish(widget):
+    """Re-run the style sheet rules after a dynamic property changed."""
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    widget.update()
 
-    def __init__(self, editor, name="", seconds=0.0, acc=0.0):
+
+# The routes table is built from fixed-width columns, not a QTableWidget: the
+# header, the rows and the total line have to line up with each other, so every
+# width lives here once.
+ROUTES_GRIP_W = 16       # the handle a route is dragged by
+ROUTES_ORDER_W = 40      # the number the player types to tell routes apart
+ROUTES_CAT_W = 96        # the category a route is filed under
+ROUTES_TIME_W = 100      # the two time columns leave the name room to read
+ROUTES_COUNT_W = 18      # the count-this-route switch
+ROUTES_BIN_W = 28
+ROUTES_GAP = 6
+# Everything to the right of the accumulative column, gaps included. The header
+# and the total line park a spacer this wide so their captions stay on top of
+# the fields they name.
+ROUTES_TAIL = ROUTES_GAP + ROUTES_COUNT_W + ROUTES_GAP + ROUTES_BIN_W
+
+# The combo entry that creates a category instead of picking one. A NUL byte
+# cannot be typed into a category name, so this never clashes with a real one.
+NEW_CATEGORY = "\u0000new-category"
+
+
+class RouteGrip(QWidget):
+    """The handle in front of a route: pressing it drags the whole row."""
+
+    def __init__(self, row):
+        super().__init__(row)
+        self.row = row
+        self.setObjectName("routegrip")
+        self.setFixedWidth(ROUTES_GRIP_W)
+        self.setMinimumHeight(30)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip(tr("Drag this route to move it. Dropping it on another "
+                           "category files it under that category."))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        hover = self.underMouse()
+        color = QColor(self.palette().color(QPalette.WindowText))
+        color.setAlpha(190 if hover else 125)
+        pen = QPen(color)
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        middle = self.width() / 2.0
+        center = self.height() / 2.0
+        for step in (-6.0, -2.0, 2.0, 6.0):
+            painter.drawLine(QPointF(middle - 4.0, center + step),
+                             QPointF(middle + 4.0, center + step))
+        painter.end()
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.row.begin_drag(event.globalPosition().toPoint())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            self.row.drag_to(event.globalPosition().toPoint())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.row.end_drag()
+        event.accept()
+
+
+class _RouteCombo(QComboBox):
+    """A category picker that never changes from the mouse wheel.
+
+    A closed combo sits in the middle of the list, so scrolling the page used to
+    land on one and quietly refile the route under the pointer - and the combo
+    also took the keyboard on a wheel pass (Qt's WheelFocus), which kept the
+    next wheel working on it. The wheel is ignored here and scrolls the page
+    instead; the category is picked by clicking the combo and choosing, or with
+    the arrow keys once it was clicked.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class RouteRow(QFrame):
+    """One route: grip, read order, name, category, the two times and switches."""
+
+    def __init__(self, editor, name="", seconds=0.0, acc=0.0, order=1,
+                 count=True, category=""):
         super().__init__()
         from .core import format_time
         self.editor = editor
         self.original = name
+        self.category = category or ""
         self._last_edited = "route"
         self.setObjectName("routerow")
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        row.setSpacing(ROUTES_GAP)
+        self.grip = RouteGrip(self)
+        # the read order is the player's own label: it is stored as typed and
+        # never moves the row, so a number can be edited without the list jumping
+        self.order_field = QLineEdit(str(order))
+        self.order_field.setObjectName("routeorder")
+        self.order_field.setFixedWidth(ROUTES_ORDER_W)
+        self.order_field.setMinimumHeight(30)
+        self.order_field.setMaxLength(4)
+        self.order_field.setAlignment(Qt.AlignCenter)
+        self.order_field.setValidator(QIntValidator(1, 9999, self))
+        self.order_field.setToolTip(tr("Read order. The accumulative time follows "
+                                       "this number, not the position in the list."))
         self.name_field = QLineEdit(name)
         self.name_field.setPlaceholderText(tr("Route name"))
         self.name_field.setMinimumHeight(30)
+        # a combo, not a text field: a category is created once and then picked,
+        # so a typo cannot quietly split one category in two
+        self.cat_box = _RouteCombo()
+        self.cat_box.setObjectName("routecat")
+        self.cat_box.setFixedWidth(ROUTES_CAT_W)
+        self.cat_box.setMinimumHeight(30)
+        self.cat_box.setMaxVisibleItems(16)
+        self.cat_box.setToolTip(tr("The category this route is filed under. Pick "
+                                   "\u201c%s\u201d to make a new one.")
+                                % tr("New category\u2026"))
         self.route_field = QLineEdit(format_time(seconds) if seconds else "")
-        self.route_field.setPlaceholderText("0s")
-        self.route_field.setFixedWidth(124)
+        self.route_field.setObjectName("routetime")
+        self.route_field.setFixedWidth(ROUTES_TIME_W)
         self.route_field.setMinimumHeight(30)
+        self.route_field.setPlaceholderText(tr("0s"))
+        self.route_field.setToolTip(tr("Time spent in this route. Type 1h 20m, "
+                                       "80:30 or 4830"))
         self.route_field.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.route_field.setToolTip(tr("Time spent in this route"))
         self.acc_field = QLineEdit(format_time(acc) if acc else "")
-        self.acc_field.setPlaceholderText("0s")
-        self.acc_field.setFixedWidth(124)
+        self.acc_field.setObjectName("routetime")
+        self.acc_field.setFixedWidth(ROUTES_TIME_W)
         self.acc_field.setMinimumHeight(30)
+        self.acc_field.setPlaceholderText(tr("0s"))
+        self.acc_field.setToolTip(tr("Playtime reached when this route ends. It is "
+                                     "rebuilt from the routes that count."))
         self.acc_field.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.acc_field.setToolTip(tr("Total playtime when this route ends"))
+        self.count_box = QCheckBox()
+        self.count_box.setChecked(bool(count))
+        self.count_box.setFixedWidth(ROUTES_COUNT_W)
+        self.count_box.setToolTip(tr("Count this route's time in the accumulative "
+                                     "column and in the total"))
         self.bin_button = QToolButton()
         self.bin_button.setObjectName("bin")
         self.bin_button.setIcon(QIcon(trash_pixmap()))
         self.bin_button.setIconSize(QSize(16, 16))
         self.bin_button.setToolTip(tr("Remove this route"))
         self.bin_button.setCursor(Qt.PointingHandCursor)
-        self.bin_button.setFixedSize(32, 30)
+        self.bin_button.setFixedSize(ROUTES_BIN_W, 30)
+        row.addWidget(self.grip)
+        row.addWidget(self.order_field)
         row.addWidget(self.name_field, 1)
+        row.addWidget(self.cat_box)
         row.addWidget(self.route_field)
         row.addWidget(self.acc_field)
+        row.addWidget(self.count_box, 0, Qt.AlignCenter)
         row.addWidget(self.bin_button)
         self.route_field.textEdited.connect(lambda *_: self._mark("route"))
         self.acc_field.textEdited.connect(lambda *_: self._mark("acc"))
         for field in (self.name_field, self.route_field, self.acc_field):
             field.editingFinished.connect(lambda row=self: editor.commit_row(row))
+        self.order_field.editingFinished.connect(lambda row=self: editor.commit_order(row))
+        self.cat_box.activated.connect(lambda index, row=self: editor.pick_category(row, index))
+        self.count_box.toggled.connect(lambda state, row=self: editor.set_count(row, state))
         self.bin_button.clicked.connect(lambda: editor.remove_row(self))
 
     def _mark(self, which):
         self._last_edited = which
 
+    # ------------------------------------------------------------- dragging
+    def begin_drag(self, position):
+        self.editor.begin_drag(self, position)
+
+    def drag_to(self, position):
+        self.editor.drag_to(position)
+
+    def end_drag(self):
+        self.editor.end_drag()
+
+    # ---------------------------------------------------------------- state
     def set_times(self, seconds, acc):
         from .core import format_time
         if not self.route_field.hasFocus():
@@ -5971,15 +6149,104 @@ class RouteRow(QFrame):
         if not self.acc_field.hasFocus():
             self.acc_field.setText(format_time(acc) if acc else "")
 
+    def set_counted(self, count):
+        blocked = self.count_box.blockSignals(True)
+        self.count_box.setChecked(bool(count))
+        self.count_box.blockSignals(blocked)
+
+    def set_order(self, order):
+        if not self.order_field.hasFocus():
+            self.order_field.setText(str(order))
+
+    def set_category_display(self, category):
+        index = self.cat_box.findData(category or "")
+        if index < 0:
+            self.editor.fill_categories(force=True)
+            index = self.cat_box.findData(category or "")
+        blocked = self.cat_box.blockSignals(True)
+        self.cat_box.setCurrentIndex(max(index, 0))
+        self.cat_box.blockSignals(blocked)
+
+    def reset_category_items(self, categories):
+        """Rebuild the list of categories, keeping the one this row shows."""
+        blocked = self.cat_box.blockSignals(True)
+        self.cat_box.clear()
+        self.cat_box.addItem(tr("No category"), "")
+        for name in categories:
+            self.cat_box.addItem(name, name)
+        self.cat_box.addItem(tr("New category\u2026"), NEW_CATEGORY)
+        self.cat_box.blockSignals(blocked)
+        self.set_category_display(self.category)
+
+
+class GroupHead(QWidget):
+    """The caption of a category: it sums the group and drags the whole group."""
+
+    def __init__(self, editor, category):
+        super().__init__(editor.body)
+        self.editor = editor
+        self.category = category
+        self.setObjectName("routegroup")
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip(tr("Drag this heading to move the whole category."))
+        self._press = None
+        line = QHBoxLayout(self)
+        line.setContentsMargins(0, 6, 0, 0)
+        line.setSpacing(ROUTES_GAP)
+        # start under the route names, so the caption reads as their heading
+        line.addSpacing(ROUTES_GRIP_W + ROUTES_GAP + ROUTES_ORDER_W + ROUTES_GAP)
+        self.label = QLabel(category or tr("No category"))
+        self.label.setObjectName("caps")
+        self.value = QLabel("")
+        self.value.setObjectName("sub")
+        self.value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.value.setToolTip(tr("The routes of this category added up"))
+        line.addWidget(self.label, 0)
+        line.addWidget(self.value, 0)
+        line.addStretch(1)
+        line.addSpacing(ROUTES_TAIL)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press = event.globalPosition().toPoint()
+            self.editor.begin_group_drag(self.category, self._press)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press is not None:
+            self.editor.drag_group_to(event.globalPosition().toPoint())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._press is not None:
+            self._press = None
+            self.editor.end_group_drag()
+        super().mouseReleaseEvent(event)
+
 
 class RoutesEditor(QWidget):
     """Routes of one game: the time in the route and the total so far.
 
     Typing either number fills the other in: the route time is what remains
-    after the route above, the accumulative time is the playtime reached when
-    the route ends. Times are typed by hand and saved on focus-out; the app
-    never guesses where a chapter ends and nothing here touches the session
-    clock, statistics or Discord.
+    after the route read before it, the accumulative time is the playtime
+    reached when the route ends. Times are typed by hand and saved on
+    focus-out; the app never guesses where a chapter ends and nothing here
+    touches the session clock, statistics or Discord.
+
+    The accumulative column walks the routes in read order: sorted by the
+    numbers the player typed, the position in the list only breaking a tie
+    between two routes that share a number. The numbers are stored exactly as
+    typed and no route is ever renumbered, and the list is never re-sorted
+    behind the player's back either: it stays the order they dragged it into.
+    Two routes may share one number, which is how two branches read at the same
+    time are marked; the number is then drawn in red so it never looks like a
+    mistake that was silently fixed. The count switch takes a route out of the
+    accumulative column and out of the total without deleting it.
+
+    Rows are dragged by their grip. Dropping a row on the middle of another
+    route files it where that route sits, so it takes over that route's
+    category; dropping it at the bottom of a block keeps that block's category;
+    dragging a block's heading moves the whole block.
     """
 
     def __init__(self, parent, engine, game, on_change=None):
@@ -5988,7 +6255,16 @@ class RoutesEditor(QWidget):
         self.game = game
         self.on_change = on_change
         self.rows = []
+        self._order = []          # ("head", category) / ("row", widget), top to bottom
+        self._heads = {}          # category -> caption widget
+        self._head_values = {}    # category -> the label holding its sum
+        self._cat_list = []
+        self._signature = None
         self._updating = False
+        self._removing = False
+        self._drag = None
+        self._group_drag = None
+        self._message = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -6000,29 +6276,48 @@ class RoutesEditor(QWidget):
         self.head.setObjectName("routeshead")
         head = QHBoxLayout(self.head)
         head.setContentsMargins(0, 0, 0, 2)
-        head.setSpacing(8)
+        head.setSpacing(ROUTES_GAP)
+        self.order_head = QLabel(tr("ORDER"))
+        self.order_head.setObjectName("caps")
+        self.order_head.setFixedWidth(ROUTES_ORDER_W)
+        self.order_head.setAlignment(Qt.AlignCenter)
+        self.order_head.setToolTip(tr("Read order \u2013 the accumulative time "
+                                      "follows this number, not the position "
+                                      "in the list."))
         title = QLabel(tr("ROUTES"))
         title.setObjectName("caps")
-        # the two time columns only make sense once there is a route to describe
+        self.cat_head = QLabel(tr("CATEGORY"))
+        self.cat_head.setObjectName("caps")
+        self.cat_head.setFixedWidth(ROUTES_CAT_W)
+        self.cat_head.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.route_head = QLabel(tr("ROUTE TIME"))
         self.route_head.setObjectName("caps")
-        self.route_head.setFixedWidth(124)
+        self.route_head.setFixedWidth(ROUTES_TIME_W)
         self.route_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.acc_head = QLabel(tr("ACCUMULATIVE"))
         self.acc_head.setObjectName("caps")
-        self.acc_head.setFixedWidth(124)
+        self.acc_head.setFixedWidth(ROUTES_TIME_W)
         self.acc_head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        head.addSpacing(ROUTES_GRIP_W + ROUTES_GAP)
+        head.addWidget(self.order_head)
         head.addWidget(title, 1)
+        head.addWidget(self.cat_head)
         head.addWidget(self.route_head)
         head.addWidget(self.acc_head)
-        head.addSpacing(49)
+        # addSpacing is a spacer, not an item: it carries the whole tail
+        head.addSpacing(ROUTES_TAIL)
         layout.addWidget(self.head)
 
-        self.rows_box = QVBoxLayout()
+        # the rows live in their own widget: a reorder can then lift them all out
+        # of the layout and put them back in one go, and a widget that is parked
+        # here can never be left floating on top of another row
+        self.body = QWidget()
+        self.body.setObjectName("routesbody")
+        self.rows_box = QVBoxLayout(self.body)
         self.rows_box.setContentsMargins(0, 0, 0, 0)
         self.rows_box.setSpacing(6)
         self.rows_box.setAlignment(Qt.AlignTop)
-        layout.addLayout(self.rows_box)
+        layout.addWidget(self.body)
 
         # the total is a plain line of text under the rows, not another box, and
         # it carries the + as well: one row for both keeps the card short and
@@ -6031,7 +6326,7 @@ class RoutesEditor(QWidget):
         self.total_row.setObjectName("routestotal")
         total_line = QHBoxLayout(self.total_row)
         total_line.setContentsMargins(0, 8, 0, 0)
-        total_line.setSpacing(8)
+        total_line.setSpacing(ROUTES_GAP)
         self.add_button = QToolButton()
         self.add_button.setObjectName("add")
         self.add_button.setText("+")
@@ -6046,15 +6341,14 @@ class RoutesEditor(QWidget):
         total_line.addWidget(self.total_caps)
         self.total_value = QLabel("")
         self.total_value.setObjectName("totalvalue")
-        self.total_value.setFixedWidth(124)
+        self.total_value.setFixedWidth(ROUTES_TIME_W)
         self.total_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         total_line.addWidget(self.total_value)
-        total_line.addSpacing(49)
+        total_line.addSpacing(ROUTES_TAIL)
         layout.addWidget(self.total_row)
 
         # the message shares the action row, so a hint or an error no longer
         # adds a line of its own under the button
-        self._message = ""
         self.hint = QLabel("")
         self.hint.setObjectName("help")
         self.hint.setWordWrap(True)
@@ -6088,18 +6382,78 @@ class RoutesEditor(QWidget):
         else:
             self.refresh()
 
+    def _entries(self):
+        """The stored routes, in stored (read) order, with the total so far."""
+        return self.engine.routes(self.game) if self.game else []
+
+    @staticmethod
+    def _display(entries):
+        """The rows grouped by category, in the order the first one appears."""
+        groups = []
+        seen = {}
+        for entry in entries:
+            index = seen.get(entry["category"])
+            if index is None:
+                seen[entry["category"]] = len(groups)
+                groups.append((entry["category"], [entry]))
+            else:
+                groups[index][1].append(entry)
+        return groups
+
+    @staticmethod
+    def _with_headers(groups):
+        # a card that has never been categorised keeps the plain 2.3.4 look
+        return len(groups) > 1 or any(name for name, _ in groups)
+
+    def _collect(self):
+        """The stored routes in read order, with what the widgets show now.
+
+        The list the game keeps is the order the routes are drawn in, block by
+        block and the way the player dragged them: that is what the VNDB note
+        follows. The accumulative column does not ride on it - it is sorted by
+        the read order numbers, and only a tie falls back on this position. The
+        numbers are read off the widgets here.
+        """
+        by_name = {row.original: row for row in self.rows if row.original}
+        entries = []
+        for entry in self._entries():
+            item = dict(entry)
+            row = by_name.get(entry["name"])
+            if row is not None:
+                item["category"] = row.category
+                item["count"] = row.count_box.isChecked()
+                try:
+                    order = int((row.order_field.text() or "").strip())
+                except (TypeError, ValueError):
+                    order = 0
+                if order > 0:
+                    item["order"] = order
+            entries.append(item)
+        return entries
+
+    def _lookup(self, row, entries):
+        """(index, entry) of the route a row stands for, matched by its name."""
+        if row.original:
+            for index, entry in enumerate(entries):
+                if entry["name"] == row.original:
+                    return index, entry
+        return None, None
+
+    @staticmethod
+    def _next_order(entries):
+        return (max(entry["order"] for entry in entries) + 1) if entries else 1
+
     def _editing(self):
+        """True while a field of this editor holds the keyboard."""
         focused = QApplication.focusWidget()
         for row in self.rows:
-            if focused in (row.name_field, row.route_field, row.acc_field):
+            if focused in (row.name_field, row.route_field, row.acc_field,
+                           row.order_field):
                 return True
         return False
 
-    def _entries(self):
-        return self.engine.routes(self.game) if self.game else []
-
+    # -------------------------------------------------------------- refresh
     def refresh(self, force=False):
-        from .core import format_time
         if self._updating:
             return
         if not force and self._editing():
@@ -6113,35 +6467,180 @@ class RoutesEditor(QWidget):
 
     def _refresh(self, force=False):
         entries = self._entries()
-        current = [row.original for row in self.rows if row.original]
-        wanted = [entry["name"] for entry in entries]
-        if current != wanted or force:
-            # rebuild in the stored order: reusing a row that happens to share a
-            # name (a rename, a reordered list) would leave the two columns of a
-            # different route in place
-            for row in list(self.rows):
-                self.rows.remove(row)
-                row.setParent(None)
-                row.deleteLater()
-            for entry in entries:
-                self._append_row(entry["name"], entry["seconds"], entry["acc"])
-            self._resync()
-        for entry, row in zip(entries, self.rows):
-            row.set_times(entry["seconds"], entry["acc"])
+        signature = [(entry["name"], entry["category"]) for entry in entries]
+        if force or signature != self._signature or len(entries) != len(self.rows):
+            self._build(entries)
+            self._signature = signature
+        self.fill_categories()
+        self._sync_values(entries)
+        self._sync_heads(entries)
         self._sync_footer(entries)
 
-    def _sync_footer(self, entries=None):
+    # ---------------------------------------------------------------- build
+    def _build(self, entries):
+        """Lay the stored list out again, reusing the rows that are still here.
+
+        Rows are never destroyed and rebuilt for an ordinary edit: a widget that
+        is deleted while the user is clicking in the list leaves the layout
+        holding a dead child, which is what used to paint one row on top of
+        another.
+        """
+        groups = self._display(entries)
+        existing = {}
+        for row in self.rows:
+            if row.original:
+                existing.setdefault(row.original, row)
+        keep = set()
+        rows = []
+        for category, members in groups:
+            for entry in members:
+                row = existing.get(entry["name"])
+                if row is None:
+                    row = RouteRow(self, entry["name"], entry["seconds"],
+                                   entry["acc"], entry["order"], entry["count"],
+                                   category)
+                else:
+                    row.category = entry["category"]
+                keep.add(row)
+                rows.append(row)
+        for row in self.rows:
+            if row not in keep:
+                row.setParent(None)
+                row.hide()
+                row.deleteLater()
+        self._rebuild_order(rows)
+
+    def _head_for(self, category):
+        """The caption widget of a category, created on first use."""
+        head = self._heads.get(category)
+        if head is None:
+            head = GroupHead(self, category)
+            self._heads[category] = head
+            self._head_values[category] = head.value
+        return head
+
+    def _rebuild_order(self, rows):
+        """Show these rows, in this order, with one block per group.
+
+        The rows are grouped by category before they are laid out, so a group is
+        always a single block: a route can never leave its category split in two
+        halves with another group in between while it is being dragged around.
+        """
+        groups = []
+        index = {}
+        for row in rows:
+            key = row.category
+            if key not in index:
+                index[key] = len(groups)
+                groups.append((key, []))
+            groups[index[key]][1].append(row)
+        order = []
+        for category, members in groups:
+            self._head_for(category)
+            order.append(("head", category))
+            order.extend(("row", row) for row in members)
+        self._order = order
+        self.setUpdatesEnabled(False)
+        try:
+            box = self.rows_box
+            while box.count():
+                widget = box.takeAt(0).widget()
+                if widget is not None:
+                    # a widget taken out of a layout keeps its old geometry, so
+                    # it would sit on top of the rows that are put back: park it
+                    # on the body until it is readded below
+                    widget.setParent(self.body)
+            for kind, payload in self._order:
+                box.addWidget(self._heads[payload] if kind == "head" else payload)
+            box.activate()
+            self.rows = [payload for kind, payload in self._order if kind == "row"]
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _sync_values(self, entries):
+        by_name = {entry["name"]: entry for entry in entries}
+        counts = {}
+        for entry in entries:
+            counts[entry["order"]] = counts.get(entry["order"], 0) + 1
+        for row in self.rows:
+            entry = by_name.get(row.original)
+            if entry is None:
+                continue
+            row.set_order(entry["order"])
+            row.set_times(entry["seconds"], entry["acc"])
+            row.set_counted(entry["count"])
+            row.set_category_display(entry["category"])
+            self._flag_order(row, counts.get(entry["order"], 0) > 1)
+
+    def _flag_order(self, row, duplicate):
+        """Show a read order two routes share, instead of quietly fixing it."""
+        duplicate = bool(duplicate)
+        current = row.order_field.property("duplicate")
+        if current is not None and bool(current) == duplicate:
+            return
+        row.order_field.setProperty("duplicate", duplicate)
+        row.order_field.setToolTip(
+            tr("Another route uses this read order. Nothing is renumbered: "
+               "the one higher in the list is counted first.")
+            if duplicate else
+            tr("Read order, for your own notes. Type any number: the row does "
+               "not move and no other route is renumbered."))
+        _polish(row.order_field)
+
+    def _sync_heads(self, entries=None):
+        """Show a heading over every group that has a row on screen."""
+        used = {}
+        for row in self.rows:
+            used[row.category] = used.get(row.category, 0) + 1
+        show = len(used) > 1 or any(used)
+        for category, head in self._heads.items():
+            head.setVisible(show and used.get(category, 0) > 0)
+
+    def _category_names(self):
+        names = {entry["category"] for entry in self._entries() if entry["category"]}
+        names.update(row.category for row in self.rows if row.category)
+        return sorted(names, key=str.casefold)
+
+    def fill_categories(self, force=False):
+        """Hand every row the same list of categories to pick from."""
+        names = self._category_names()
+        if not force and names == self._cat_list:
+            return
+        self._cat_list = names
+        for row in self.rows:
+            row.reset_category_items(names)
+
+    def _header_sums(self, entries):
+        sums = {}
+        for entry in entries:
+            total = sums.get(entry["category"], 0.0)
+            if entry["count"]:
+                total += entry["seconds"]
+            sums[entry["category"]] = total
+        return sums
+
+    def _sync_footer(self, entries):
         from .core import format_time
-        entries = self._entries() if entries is None else entries
         has_rows = bool(entries)
         # the card stays on screen with no routes at all: ROUTES is the caption
-        # that always makes sense, the two time columns arrive with the first row
+        # that always makes sense, the numbers arrive with the first row
         self.head.setVisible(True)
-        for caption in (self.route_head, self.acc_head, self.total_caps,
-                        self.total_value):
+        for caption in (self.cat_head, self.order_head, self.route_head,
+                        self.acc_head, self.total_caps, self.total_value):
             caption.setVisible(has_rows)
         self.total_row.setVisible(True)
-        self.total_value.setText(format_time(entries[-1]["acc"]) if has_rows else "")
+        counted = sum(entry["seconds"] for entry in entries if entry["count"])
+        skipped = sum(entry["seconds"] for entry in entries if not entry["count"])
+        self.total_value.setText(format_time(counted) if has_rows else "")
+        # the number the total would show with every route counted, so a switch
+        # that is off somewhere in the list cannot be mistaken for a lost route
+        self.total_caps.setText(tr("TOTAL") if not skipped else tr("TOTAL COUNTED"))
+        self.total_value.setToolTip(
+            (tr("%s with every route counted") % format_time(counted + skipped))
+            if skipped else "")
+        sums = self._header_sums(entries)
+        for category, value in self._head_values.items():
+            value.setText(format_time(sums.get(category, 0.0)))
         has_game = bool(self.game)
         self.add_button.setEnabled(has_game)
         # the button only has something to fill in once a route exists
@@ -6152,26 +6651,257 @@ class RoutesEditor(QWidget):
         self.hint.setText(self._message or ("" if self.rows else self._help()))
 
     def _help(self):
-        return tr("Add the routes you have finished and the time you spent in each.")
+        return tr("Add the routes you have finished and the time you spent in "
+                  "each. Drag the grip to move a route; the accumulative time "
+                  "follows the read order numbers.")
 
     def _say(self, text):
         """Put a message on the action row (it takes the empty-state help's place)."""
         self._message = text
         self.hint.setText(text)
 
-    def _resync(self):
-        """Keep widget order the same as the route order."""
-        for row in self.rows:
-            self.rows_box.removeWidget(row)
-        for row in self.rows:
-            self.rows_box.addWidget(row)
-        self.rows_box.activate()
+    # -------------------------------------------------------------- writing
+    @staticmethod
+    @staticmethod
+    def _sequence(entries):
+        """The indexes of the entries in read order.
 
-    def _append_row(self, name="", seconds=0.0, acc=0.0):
-        row = RouteRow(self, name, seconds, acc)
-        self.rows.append(row)
-        self.rows_box.addWidget(row)
-        return row
+        The order numbers decide and the position in the list breaks a tie; an
+        entry with no number at all comes after the numbered ones.
+        """
+        return sorted(range(len(entries)),
+                      key=lambda index: (entries[index]["order"] or 10 ** 9, index))
+
+    @classmethod
+    def _recompute(cls, entries):
+        """Hand out the running total along the read order."""
+        acc = 0.0
+        for index in cls._sequence(entries):
+            entry = entries[index]
+            if entry["count"]:
+                acc += entry["seconds"]
+            entry["acc"] = acc
+
+    def _write(self, entries):
+        """Hand the whole list to the engine: one save, one running total."""
+        self._recompute(entries)
+        self._updating = True
+        try:
+            ok = self.engine.set_all_routes(
+                self.game,
+                [(entry["name"], entry["seconds"], entry["acc"], entry["count"],
+                  entry["category"], entry["order"]) for entry in entries])
+        finally:
+            self._updating = False
+        return bool(ok)
+
+    def _after_write(self, rebuild=False):
+        """Bring the widgets up to date in place: nothing is rebuilt, nothing blinks.
+
+        `rebuild` is for the edits that change which group a row belongs to (a
+        drag, a category pick, a delete). The rows themselves are reused, so the
+        layout only re-lays itself out; it never flashes a blank card.
+        """
+        if rebuild:
+            self._build(self._entries())
+        entries = self._entries()
+        self._signature = [(entry["name"], entry["category"]) for entry in entries]
+        self._message = ""
+        self.fill_categories()
+        self._sync_values(entries)
+        self._sync_heads(entries)
+        self._sync_footer(entries)
+        if self.on_change is not None:
+            self.on_change()
+
+    # ------------------------------------------------------------- dragging
+    # ------------------------------------------------------------- dragging
+    def begin_drag(self, row, position):
+        self._drag = {"row": row, "start": position, "active": False}
+
+    def drag_to(self, position):
+        drag = self._drag
+        if not drag:
+            return
+        row = drag["row"]
+        if not drag["active"]:
+            if (position - drag["start"]).manhattanLength() < QApplication.startDragDistance():
+                return
+            drag["active"] = True
+            row.setProperty("dragging", True)
+            _polish(row)
+        self._reorder(row, position)
+
+    def end_drag(self):
+        drag, self._drag = self._drag, None
+        if not drag or not drag["active"]:
+            return
+        row = drag["row"]
+        row.setProperty("dragging", False)
+        _polish(row)
+        if not row.original:
+            return
+        # what is on screen now is what the player sees: save exactly that
+        entries = self._collect_rows()
+        if not self._write(entries):
+            self._say(tr("Could not save the new order."))
+            return
+        self._after_write(rebuild=True)
+
+    def _collect_rows(self):
+        """The stored routes in the order the rows stand on screen."""
+        entries = {entry["name"]: entry for entry in self._collect()}
+        ordered = []
+        for row in self.rows:
+            entry = entries.pop(row.original, None) if row.original else None
+            if entry is not None:
+                ordered.append(entry)
+        ordered.extend(entries.values())
+        return ordered
+
+    def begin_group_drag(self, category, position):
+        self._group_drag = {"category": category, "start": position,
+                            "active": False, "target": None}
+
+    def drag_group_to(self, position):
+        drag = self._group_drag
+        if not drag:
+            return
+        if not drag["active"]:
+            if (position - drag["start"]).manhattanLength() < QApplication.startDragDistance():
+                return
+            drag["active"] = True
+            head = self._heads[drag["category"]]
+            head.setProperty("dragging", True)
+            _polish(head)
+        target = self._group_slot(position, drag["category"])
+        if target == drag["target"]:
+            return
+        old = self._heads.get(drag["target"])
+        if old is not None:
+            old.setProperty("dropbefore", False)
+            _polish(old)
+        drag["target"] = target
+        head = self._heads.get(target)
+        if head is not None:
+            head.setProperty("dropbefore", True)
+            _polish(head)
+
+    def _group_slot(self, position, category):
+        """The group the dragged one is dropped in front of, or "" for the end.
+
+        The middle of a group's first route is its tipping point: above it the
+        group goes in front, below it the pointer is inside that group and the
+        dragged one keeps looking further down.
+        """
+        local = self.body.mapFromGlobal(position)
+        spans = []
+        for kind, payload in self._order:
+            if kind == "head":
+                spans.append([payload, None])
+            elif spans and spans[-1][1] is None:
+                spans[-1][1] = payload
+        for payload, first in spans:
+            if payload == category:
+                continue
+            if first is not None:
+                middle = first.y() + first.height() / 2.0
+            else:
+                head = self._heads[payload]
+                middle = head.y() + head.height()
+            if local.y() < middle:
+                return payload
+        return ""
+
+    def end_group_drag(self):
+        drag, self._group_drag = self._group_drag, None
+        if not drag or not drag["active"]:
+            return
+        category = drag["category"]
+        head = self._heads.get(category)
+        if head is not None:
+            head.setProperty("dragging", False)
+            _polish(head)
+        target = self._heads.get(drag["target"])
+        if target is not None:
+            target.setProperty("dropbefore", False)
+            _polish(target)
+        target = drag["target"]
+        if target is None or target == category or not self.game:
+            return
+        entries = self._entries()
+        block = [entry for entry in entries if entry["category"] == category]
+        rest = [entry for entry in entries if entry["category"] != category]
+        if not block:
+            return
+        position = len(rest)
+        for index, entry in enumerate(rest):
+            if entry["category"] == target:
+                position = index
+                break
+        entries = rest[:position] + block + rest[position:]
+        if [entry["name"] for entry in entries] == [entry["name"] for entry in self._entries()]:
+            return
+        if not self._write(entries):
+            self._say(tr("Could not save the new category order."))
+            return
+        self._after_write(rebuild=True)
+
+    def _bands(self, dragged=None):
+        """The groups on screen: a band starts at its heading.
+
+        The heading belongs to its own group, so a drop under a heading or in
+        the space under the last route of a group files the route under that
+        group instead of falling into the group that comes next.
+        """
+        bands = []
+        for kind, payload in self._order:
+            if kind == "head":
+                bands.append({"category": payload, "rows": []})
+            elif payload is not dragged and bands:
+                bands[-1]["rows"].append(payload)
+        return bands
+
+    def _reorder(self, row, position):
+        """Move the dragged row to the place under the pointer.
+
+        The group the pointer is inside is the one the row joins; inside that
+        group the row goes before the first route whose middle the pointer has
+        passed, so dropping it at the bottom of a group keeps it in that group.
+        """
+        local = self.body.mapFromGlobal(position)
+        bands = self._bands(dragged=row)
+        if not bands:
+            return
+        chosen = 0
+        for index, band in enumerate(bands):
+            if self._heads[band["category"]].y() <= local.y():
+                chosen = index
+        band = bands[chosen]
+        before = None
+        after = None
+        for other in band["rows"]:
+            middle = other.y() + other.height() / 2.0
+            if local.y() < middle:
+                before = other
+                break
+            after = other
+        row.category = band["category"]
+        others = [other for other in self.rows if other is not row]
+        if before is not None:
+            index = others.index(before)
+        elif after is not None:
+            index = others.index(after) + 1
+        else:
+            # the group was left with nothing but the route in the air: it lands
+            # right under that group's heading
+            index = sum(len(item["rows"]) for item in bands[:chosen])
+        rows = others[:index] + [row] + others[index:]
+        if rows == self.rows:
+            return
+        self._rebuild_order(rows)
+        self._sync_heads()
+        self._sync_footer(self._entries())
 
     # ------------------------------------------------------------- actions
     def add_row(self):
@@ -6180,25 +6910,39 @@ class RoutesEditor(QWidget):
         if any(not row.original for row in self.rows):
             self.rows[-1].name_field.setFocus()
             return
-        entries = self._entries()
-        row = self._append_row("", 0.0, entries[-1]["acc"] if entries else 0.0)
+        # the new row joins the category that is being written last, which is
+        # where the eye already is after pressing +
+        category = self.rows[-1].category if self.rows else ""
+        orders = []
+        for row in self.rows:
+            try:
+                orders.append(int((row.order_field.text() or "").strip()))
+            except (TypeError, ValueError):
+                continue
+        order = (max(orders) + 1) if orders else 1
+        row = RouteRow(self, "", 0.0, 0.0, order, True, category)
+        self._rebuild_order(list(self.rows) + [row])
+        self._sync_heads()
         self._message = ""
         self.hint.setText("")
-        row.route_field.setFocus()
+        row.name_field.setFocus()
 
     def commit_row(self, row):
-        if not self.game or self._updating:
+        if not self.game or self._updating or self._removing:
             return
         name = (row.name_field.text() or "").strip()
         if not name:
             return
-        entries = [dict(entry) for entry in self._entries()]
-        index = next((i for i, entry in enumerate(entries) if entry["name"] == row.original), None)
-        if index is None:
-            index = len(entries)
-            entries.append({"name": name, "seconds": 0.0,
-                            "acc": entries[-1]["acc"] if entries else 0.0})
-        elif name != row.original and any(entry["name"] == name for entry in entries):
+        entries = self._collect()
+        index, entry = self._lookup(row, entries)
+        if entry is None:
+            # the blank row from +: it joins the end of the list
+            entry = {"name": name, "seconds": 0.0, "acc": 0.0,
+                     "order": self._next_order(entries), "count": True,
+                     "category": row.category}
+            entries.append(entry)
+            index = len(entries) - 1
+        elif name != row.original and any(other["name"] == name for other in entries):
             self._say(tr("There is already a route called \u201c%s\u201d.") % name)
             return
         route_raw = (row.route_field.text() or "").strip()
@@ -6212,74 +6956,172 @@ class RoutesEditor(QWidget):
             return
         row.route_field.setStyleSheet("")
         row.acc_field.setStyleSheet("")
-        previous = entries[index - 1]["acc"] if index > 0 else 0.0
+        entry["name"] = name
+        entry["count"] = bool(row.count_box.isChecked())
+        entry["category"] = row.category
+        sequence = self._sequence(entries)
+        position = sequence.index(index) if index in sequence else -1
+        previous = entries[sequence[position - 1]]["acc"] if position > 0 else 0.0
         if row._last_edited == "acc" and acc_raw:
             acc = max(previous, acc_typed)
-            seconds = acc - previous
+            entry["seconds"] = acc - previous
         else:
-            seconds = max(0.0, route_typed)
-            acc = previous + seconds
-        entries[index] = {"name": name, "seconds": seconds, "acc": acc}
-        for later in range(index + 1, len(entries)):
-            entries[later]["acc"] = entries[later - 1]["acc"] + entries[later]["seconds"]
-        self._updating = True
-        try:
-            ok = self.engine.set_all_routes(
-                self.game, [(entry["name"], entry["seconds"], entry["acc"]) for entry in entries])
-        finally:
-            self._updating = False
-        if not ok:
-            self._say(tr("There is already a route called \u201c%s\u201d.") % name)
+            entry["seconds"] = max(0.0, route_typed)
+        if not self._write(entries):
+            self._say(tr("Could not save the route."))
             return
-        row.original = name
-        self._changed()
+        if name != row.original:
+            row.original = name
+        self._after_write(rebuild=True)
+
+    def commit_order(self, row):
+        """Read the typed order number out of the row.
+
+        The number is the player's own label for a route: it is stored exactly as
+        typed, no other route is renumbered and the row does not move. Two
+        routes may share one - that is how two branches read at the same time are
+        marked - and both are drawn in red so it does not look like a fix that
+        was silently made. Moving a route is what the grip is for.
+        """
+        if not self.game or self._updating or self._removing:
+            return
+        try:
+            wanted = int((row.order_field.text() or "").strip())
+        except (TypeError, ValueError):
+            wanted = 0
+        entries = self._collect()
+        index, entry = self._lookup(row, entries)
+        if entry is None:
+            return
+        stored = [other for other in self._entries()
+                  if other["name"] == entry["name"]]
+        stored = stored[0]["order"] if stored else entry["order"]
+        if wanted < 1:
+            self._say(tr("The read order is a number from 1."))
+            # the field still holds the keyboard, so put the old number back by
+            # hand instead of through set_order, which leaves a focused field be
+            row.order_field.setText(str(stored))
+            return
+        if wanted == stored:
+            return
+        entry["order"] = wanted
+        if not self._write(entries):
+            self._say(tr("Could not save the new order."))
+            return
+        self._after_write()
+        shared = [other["name"] for other in self._entries()
+                  if other["order"] == wanted and other["name"] != entry["name"]]
+        if shared:
+            self._say(tr("Another route already uses the read order %d. Both are "
+                         "kept; the accumulative column follows the position in "
+                         "the list until the numbers differ.") % wanted)
+
+    def pick_category(self, row, index):
+        """A category was picked for this row (or a new one was asked for)."""
+        if not self.game or self._updating:
+            return
+        value = row.cat_box.itemData(index)
+        if value == NEW_CATEGORY:
+            self.create_category(row)
+            return
+        value = value or ""
+        if value == row.category:
+            return
+        row.category = value
+        self._move_to_category(row)
+
+    def create_category(self, row):
+        """Ask for a name, create the category and file this row under it."""
+        name, ok = QInputDialog.getText(self, tr("New category"),
+                                        tr("Name of the new category:"),
+                                        QLineEdit.Normal, "")
+        name = (name or "").strip()
+        if not ok or not name:
+            row.set_category_display(row.category)
+            return
+        row.category = name
+        self.fill_categories(force=True)
+        row.set_category_display(name)
+        self._move_to_category(row)
+
+    def _move_to_category(self, row):
+        """File the row under the category it now has, in the place it already holds.
+
+        A category says which part of the game it is, not when it was read: only
+        the read order number moves a route along the accumulative column.
+        """
+        if not self._write(self._collect()):
+            return
+        self._after_write(rebuild=True)
+
+    def set_count(self, row, state):
+        """Take a route out of the accumulative column and the total."""
+        if not self.game or self._updating:
+            return
+        entries = self._collect()
+        index, entry = self._lookup(row, entries)
+        if entry is None:
+            return
+        # _collect already reads the checkbox, so "nothing changed" has to be
+        # asked of the stored list, not of the entry it hands over
+        stored = [item for item in self._entries() if item["name"] == row.original]
+        if stored and bool(stored[0]["count"]) == bool(state):
+            return
+        entry["count"] = bool(state)
+        if not self._write(entries):
+            return
+        self._after_write()
 
     def set_current(self):
         if not self.game:
             return
         from .core import format_time
-        entries = self._entries()
+        entries = self._collect()
         if not entries:
             self._say(tr("Add a route first."))
             return
         recorded = float(self.engine.total_seconds or 0.0)
-        previous = entries[-2]["acc"] if len(entries) > 1 else 0.0
+        # the button makes the running total reach the recorded one, so it fills
+        # in the route that comes last in read order, not last in the list
+        sequence = self._sequence(entries)
+        last = sequence[-1]
+        previous = entries[sequence[-2]]["acc"] if len(sequence) > 1 else 0.0
         if recorded <= previous:
             self._say(tr("The recorded total (%s) is not larger than the route above.")
                               % format_time(recorded))
             return
         question = tr("Set the accumulative time of \u201c%s\u201d to the current total playtime (%s)?") % (
-            entries[-1]["name"], format_time(recorded))
+            entries[last]["name"], format_time(recorded))
         if QMessageBox.question(self, tr("Set current time"), question) != QMessageBox.Yes:
             return
-        entries[-1]["acc"] = recorded
-        entries[-1]["seconds"] = recorded - previous
-        self._updating = True
-        try:
-            self.engine.set_all_routes(
-                self.game, [(entry["name"], entry["seconds"], entry["acc"]) for entry in entries])
-        finally:
-            self._updating = False
-        self._changed()
+        entries[last]["count"] = True
+        entries[last]["seconds"] = recorded - previous
+        self._write(entries)
+        self._after_write()
 
     def remove_row(self, row):
-        name = row.original
-        if name:
-            question = tr("Remove the route \u201c%s\u201d and its time?") % name
+        entries = self._collect()
+        index, entry = self._lookup(row, entries)
+        if entry is not None:
+            question = tr("Remove the route \u201c%s\u201d and its time?") % entry["name"]
             if QMessageBox.question(self, tr("Remove route"), question) != QMessageBox.Yes:
                 return
-            self.engine.remove_route(self.game, name)
-        self.rows.remove(row)
-        row.setParent(None)
-        row.deleteLater()
-        self._changed()
+            entries.pop(index)
+            # the numbers belong to the player: deleting a row never renumbers
+            # the ones that are left
+            if not self._write(entries):
+                return
+        # taking the row out of the layout moves the focus, which fires the
+        # field's editingFinished and would re-add the route we just deleted
+        self._removing = True
+        try:
+            row.setParent(None)
+            row.hide()
+            row.deleteLater()
+        finally:
+            self._removing = False
+        self._after_write(rebuild=True)
 
-    def _changed(self):
-        # a rebuilt list means the last message has been dealt with
-        self._message = ""
-        self.refresh(force=True)
-        if self.on_change is not None:
-            self.on_change()
 
 
 class GameEditorDialog(QDialog):
@@ -6290,7 +7132,8 @@ class GameEditorDialog(QDialog):
         self.window = window
         self.game = game
         self.setWindowTitle("Edit game")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(820)
+        self.resize(900, 630)
 
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -6349,6 +7192,12 @@ class GameEditorDialog(QDialog):
         from .core import format_time
         time_form.addWidget(QLabel("Total time (e.g. 3h15m, 195m, 3:15:00)"))
         self.time_edit = QLineEdit(format_time(game.get("total_seconds", 0)))
+        # Remembered so _save() can tell "the user retyped the total" apart from
+        # "they only fixed the title": parse_time_input() only understands whole
+        # seconds, so writing it back unconditionally slices up to 1 s off a
+        # total that stats.db still has to the millisecond - which is exactly the
+        # 1 s "total vs statistics" gap this release is fixing.
+        self._total_text = self.time_edit.text()
         time_form.addWidget(self.time_edit)
         time_form.addWidget(QLabel(tr("Current: %s")
                                    % format_time(game.get("total_seconds", 0))))
@@ -6390,8 +7239,21 @@ class GameEditorDialog(QDialog):
         hint.setObjectName("sub")
         hint.setWordWrap(True)
         layout.addWidget(hint)
-        self.routes_editor = RoutesEditor(page, self.window.engine, self.game)
-        layout.addWidget(self.routes_editor, 1)
+        # a game can have twenty routes: the list scrolls instead of stretching
+        # the dialog past the bottom of the screen
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        self.routes_editor = RoutesEditor(body, self.window.engine, self.game)
+        body_layout.addWidget(self.routes_editor)
+        body_layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setObjectName("routescroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
         return page
 
 
@@ -6456,7 +7318,11 @@ class GameEditorDialog(QDialog):
         self.game["process_names"] = [name.strip() for name in
                                       (self.proc_edit.text() or "").split(",")
                                       if name.strip()]
-        self.game["total_seconds"] = parse_time_input(self.time_edit.text())
+        if self.time_edit.text().strip() != self._total_text.strip():
+            # Only when the field really changed: an untouched field must keep
+            # its sub-second value, otherwise just fixing a title would drop a
+            # fraction and stats.db would be up to 1 s ahead again.
+            self.game["total_seconds"] = parse_time_input(self.time_edit.text())
         self.accept()
 
 
@@ -7397,6 +8263,7 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         # runs (it also accumulates the clock). An idle window therefore wakes
         # up once every IDLE_TICK_MS instead of ten times a second.
         self._busy = None                       # None until the first tick
+        self._painted_stamp = None              # last (second, status, game) drawn
         self.timer = QTimer(self)               # 1 s detection tick (busy only)
         self.timer.timeout.connect(self.tick)
         self.idle_timer = QTimer(self)          # cheap "did a game appear?" probe
@@ -7895,7 +8762,11 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         # paint the page the moment it opens: while a game runs the clock tick
         # owns the numbers, and it would otherwise arrive up to a second later
         if index == 2:
-            self.stats_page.refresh_now()
+            if self.engine.game is None:
+                self.stats_page.refresh_now()   # nothing is running to sync with
+            else:
+                # the same pass that paints Detection, from the same sample
+                self._paint_live(force=True)
         elif index == 1:
             self.now_page.update_from_engine()
 
@@ -8045,38 +8916,41 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self.request_cover(url, card._got_cover)
 
     def refresh_clock_display(self):
-        """Recount session/total once a second without running detection.
+        """Repaint the running clocks once a second (the detection tick's job too)."""
+        self._paint_live()
 
-        Detection and Statistics read the same total from here and are painted
-        in the same pass: the two cards used to be refreshed by separate timers,
-        so a rounding step could land between them and they showed numbers one
-        second apart.
+    def _paint_live(self, force=False):
+        """Paint Detection, the status bar and Statistics from ONE time sample.
+
+        2.3.4 already refreshed both cards in the same pass, but each side still
+        called time.time() for itself (refresh_now -> pending_seconds). Two calls
+        a few milliseconds apart can land on different sides of a whole second,
+        so the two cards showed 11 s against 12 s for the same playtime. The
+        engine now stamps session/total from the sample taken here and the
+        Statistics page is handed that same sample instead of sampling again.
+
+        The detection tick and the clock timer both call in; the stamp below
+        keeps it to one paint per second (plus an immediate one when the status
+        or the game changed), so two painters can never draw two seconds.
         """
         engine = self.engine
-        show_now = self.now_page.isVisible()
-        show_stats = self.stats_page.isVisible()
-        if not (show_now or show_stats):
-            return
         if engine.game is None:
-            return
-        if engine.status != "Reading":
-            # the preview's own clock (paused/idle) still ticks; the session and
-            # the total stay where the engine left them
-            if show_now:
-                self.now_page.refresh_preview_timer()
-            if show_stats:
-                self.stats_page.refresh_now()
-            return
-        if engine._reading_start is None:
+            self.now_page.update_from_engine()
             return
         now = time.time()
-        current = max(0.0, now - engine._reading_start)
-        engine.session_seconds = engine._session_accumulated + current
-        engine.total_seconds = engine.live_total(now)
-        if show_now:
-            self.now_page.update_from_engine()
-        if show_stats:
-            self.stats_page.refresh_now()
+        stamp = (int(now), engine.status, id(engine.game))
+        if not force and stamp == getattr(self, "_painted_stamp", None):
+            return
+        self._painted_stamp = stamp
+        engine.sample_clock(now)
+        self.now_page.update_from_engine()
+        if engine.status != "Reading":
+            # update_from_engine() is stamp-guarded and returns early while the
+            # session and the total stand still, but the preview's own clock
+            # (paused/idle) still has to tick
+            self.now_page.refresh_preview_timer()
+        if self.stats_page.isVisible():
+            self.stats_page.refresh_now(now)
 
     def _focus_changed(self, hwnd=None):
         """Coalesce a burst of focus events into a single tick.
@@ -8165,7 +9039,8 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
     def tick(self):
         self.engine.tick()
-        self.now_page.update_from_engine()
+        # one paint for Detection, the status bar and Statistics, from one sample
+        self._paint_live()
         # start/stop the hotkey poll with the game (a few instructions per tick)
         self._sync_hotkey_poll()
         if not self.engine.preview:
@@ -8265,6 +9140,15 @@ class Application:
             record_time=self.config.get("record_time", True))
         self.engine.games = self.games
         self.engine.on_save = lambda: store.save_games(self.engine.games)
+        # 2.3.4 wrote the running stretch into stats.db without adding it to the
+        # game's total, so a few titles carry a sub-second gap that is enough to
+        # show a different second on the two cards. Fold those back once - only
+        # gaps of the leak's own size, never a real disagreement.
+        try:
+            if self.engine.repair_leaked_totals():
+                store.save_games(self.engine.games)
+        except Exception as error:
+            print("total repair skipped: %s" % error)
         self.window = None
         # set once an update has been downloaded; the swap is scheduled in
         # shutdown() so "Later" really means "when you close the app"
