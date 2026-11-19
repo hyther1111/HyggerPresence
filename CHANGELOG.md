@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.4.0 - 2026-11-19
+
+**In short:** Optional VNDB API token integration (title search, full list sync, inline VNDB list editing, and auto-"Playing" status), multi-platform ratings & rankings (VNDB, Bangumi, ErogameScape), a redesigned **Game Details** dialog, Library pagination & dual-source labels, an interactive **Share Statistics** canvas creator, screenshot cursor control, and major theme-switching & resource optimizations.
+
+### Added
+- **Optional VNDB API token (`Settings → VNDB & Ratings`):**
+  - Link a personal token from `vndb.org/u/tokens` with `Verify` and `How to get token?` guidance. Every feature is optional and independently toggleable:
+  - **VNDB title search:** Search visual novels by title directly inside *Add game* and *Game Details* instead of copying URLs manually.
+  - **VNDB library sync:** Import and sync games from your VNDB list (with label filters and optional auto-sync on startup). Unlinked entries appear in the Library with `Not linked` until you attach a local `.exe`.
+  - **Inline VNDB List block in Game Details:** Edit your VNDB list entry directly without opening a popup — toggle assignable labels (excluding virtual read-only tags like *Voted* / *No label*), cast integer votes (`1`–`10`), pick start/finish dates with calendar popups, edit personal notes, manage releases, and jump directly to VNDB to vote playtime.
+  - **Auto-mark "Playing" on VNDB:** Optionally mark a game as *Playing* when launched (requires `listwrite`; never overwrites *Finished* titles).
+- **Multi-platform ratings & rankings (`hp2/ratings.py`):**
+  - Concurrently fetches VNDB weighted/average ratings, rating rank, popularity rank & vote count, Bangumi score/rank/votes, and ErogameScape median/average/rank/votes (fails fast to `N/A` if region-blocked).
+  - Displays a compact ratings summary on **Detection**, dedicated rating cards in **Game Details**, and new Presence variables (`{vndb_user_vote}`, `{vndb_label}`, `{vndb_rank}`, `{vndb_popularity}`, `{bangumi_rating}`, `{egs_median}`, etc.).
+- **Dual-source Library labels & pagination:**
+  - Games support independent `Manual` and `On VNDB List` flags (allowing `Manual + VNDB`), so turning off VNDB sync hides synced-only titles while keeping manual entries.
+  - Added Library pagination (`25 / 50 / 100 / 200 / All`, default `50`) and persisted filter selection (`All`, `Manual`, `VNDB List`, `Manual + VNDB`, `VNDB only`, `Linked (.exe)`, `Not linked`, and list labels).
+  - Added a **Stop** button for bulk VNDB sync and metadata/ratings refresh jobs.
+- **Interactive Share Statistics Canvas (`Statistics → Share…`):**
+  - Drag and resize **Title & date range**, **Summary cards**, **Activity chart**, and **Most read visual novels** directly on a live WYSIWYG canvas with grid snap, alignment guides, Undo (`Ctrl+Z`), 1-click presets (*Stacked*, *2-Column*, *Wide Banner*), custom canvas dimensions, Light/Dark theme selection, **Copy image**, **Save image…**, and **Export CSV…**.
+- **Screenshot cursor toggle (`Settings → Screenshots → Hide cursor`):**
+  - Unchecked: composites the Windows OS cursor onto unscaled captures via `DrawIconEx` (while letting Magpie's own cursor render once when upscaling).
+  - Checked: hides the OS cursor and temporarily parks the pointer outside windowed frames (or at the bottom-right corner in fullscreen) during capture.
+
+### Changed
+- **Redesigned Game Details dialog:** Replaced the old multi-tab editor with a unified scrollable **Game Details** window featuring header **Start** launcher menu, 3 platform rating cards (`VNDB (Weighted / Average)` with `Rank` & `Popularity` on one line, `Bangumi`, `ErogameScape (Median / Average)`), fixed-width `Browse…` button, collapsible advanced fields (`extra_processes`, Bangumi/EGS IDs), embedded **VNDB List** block, and inline **Routes** editor.
+- **Faster & lighter UI:**
+  - Lazy theme switching in `MainWindow.apply_theme()` defers rebuilding hidden tabs (`Screenshots`, `Statistics`, `Settings`) until opened, eliminating multi-second Light/Dark switch freezes.
+  - Bounded `Application.cover_cache` in RAM (`MAX_COVER_RAM = 80`), reduced idle/hidden polling (`StatsPage` timer `500 ms` → `2000 ms`, skipped hidden Library live refreshes), and sped up bulk metadata/VNDB list loading with `requests.Session` + `ThreadPoolExecutor` + cached auth/labels.
+- **Updated `APP_VERSION` to `2.4.0`** across `hp2/core.py` and `hp2/ui.py`, and updated `README.md` and `en` / `zh_TW` / `zh_CN` translations.
+
+### Fixed
+- **Fixed detection dropping when double-clicking or editing a game:** `i18n._ShowFilter` / `apply_to()` now translates only the newly opened dialog instead of re-applying the global `_registry` over `MainWindow` (which had been resetting active `NowPage` title/status labels back to `"No game yet"` / `"Waiting for a game…"` and leaking dialog widget references).
+- **Fixed unescaped `&` mnemonics** turning `"VNDB & Ratings"` and `"Refresh metadata & ratings when a game starts"` into `_Ratings` / `_ratings` underlines via `i18n._escape_amp()`.
+- **Fixed Activity chart blank in Share Statistics:** Updated `draw_share_canvas` to read `self.chart.days` and `self.chart.colours`.
+- **Fixed 0.1s light window flash** when opening dialogs via `QApplication.setPalette` + pre-Show `DarkDialogFilter` / DWM dark titlebar application.
+- **Fixed long VN title clipping/overflow** in Statistics cards and guarded `detector.py` `_resolved("")` for unlinked VNDB entries.
+- **Fixed `MainWindow.goto_launchers()`** opening Screenshots instead of **Settings → Launchers**.
+
 ## 2.3.5 - 2026-11-04
 
 **In short:** Detection and Statistics now print the same second, and this time

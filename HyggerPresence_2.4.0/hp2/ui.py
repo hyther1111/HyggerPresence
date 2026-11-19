@@ -8,6 +8,7 @@ clicks.
 Icons are painted with QPainter (sun / moon / window buttons) so they look the
 same on every machine and never change the layout when the theme flips.
 """
+from collections import OrderedDict
 import hashlib
 import os
 import queue
@@ -113,16 +114,44 @@ def apply_dark_title(widget, dark=True):
 
 
 class DarkDialogFilter(QObject):
-    """Every QDialog gets a dark caption while the app is in dark mode."""
+    """Ensure every QDialog inherits dark/light Win32 palette & titlebar before Show."""
 
-    def __init__(self, get_dark):
+    def __init__(self, get_dark, get_palette=None):
         super().__init__()
         self._get_dark = get_dark
+        self._get_palette = get_palette
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Show and isinstance(obj, QDialog):
+        etype = event.type()
+        if isinstance(obj, QDialog) and etype in (QEvent.WinIdChange, QEvent.Polish, QEvent.Show):
             apply_dark_title(obj, bool(self._get_dark()))
+            if self._get_palette is not None and etype == QEvent.Polish:
+                pal = self._get_palette()
+                if pal is not None:
+                    obj.setPalette(pal)
         return False
+
+
+def _build_qpalette(theme):
+    """Build a QPalette matching `theme` so unstyled native dialogs never flash white."""
+    from PySide6.QtGui import QPalette
+    p = QPalette()
+    bg = QColor(theme["bg"])
+    surf = QColor(theme["surface"])
+    txt = QColor(theme["text"])
+    sub = QColor(theme["subtext"])
+    acc = QColor(theme["accent"])
+    p.setColor(QPalette.Window, bg)
+    p.setColor(QPalette.WindowText, txt)
+    p.setColor(QPalette.Base, surf)
+    p.setColor(QPalette.AlternateBase, QColor(theme["surface2"]))
+    p.setColor(QPalette.Text, txt)
+    p.setColor(QPalette.Button, QColor(theme["surface2"]))
+    p.setColor(QPalette.ButtonText, txt)
+    p.setColor(QPalette.PlaceholderText, sub)
+    p.setColor(QPalette.Highlight, acc)
+    p.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    return p
 
 
 # --------------------------------------------------------------------------- themes
@@ -886,6 +915,7 @@ class TitleBar(QWidget):
 
 # --------------------------------------------------------------- cover helpers
 COVER_MAX = QSize(320, 440)          # biggest cover kept in memory (2x DPR safe)
+MAX_COVER_RAM = 80                     # cap decoded QImages in RAM (disk holds 400)
 SQUARE_COVER_SIZE = 512              # the Discord crop is square and this big
 
 
@@ -1173,9 +1203,10 @@ class CoverCard(QFrame):
         total = game.get("total_seconds", 0)
         if page.engine.game is game:
             total = page.engine.total_seconds
+        exe_text = Path(game["exe"]).name if (game.get("exe") or "").strip() else tr("Not linked")
         return ((tr("Total time"), format_time(total)),
                 (tr("Last read"), page.last_read_text(game)),
-                (tr("Executable"), Path(game.get("exe", "")).name))
+                (tr("Executable"), exe_text))
 
     # ---------- painting
     def paintEvent(self, _event):
@@ -1280,6 +1311,8 @@ class LibraryPage(Page):
         super().__init__(window)
         self._cards = []
         self._last_read = {}
+        self._page = 1
+        self._filtered_games = []
         self.view_mode = self.LIST
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 16)
@@ -1290,17 +1323,46 @@ class LibraryPage(Page):
         self.heading.setObjectName("h1")
         head.addWidget(self.heading)
         head.addStretch(1)
-        self.vndb_all_button = QPushButton(tr("Fetch all from VNDB"))
+        self.vndb_sync_button = QPushButton(tr("Sync VNDB"))
+        self.vndb_sync_button.setToolTip(
+            tr("Import and update games from your VNDB list"))
+        self.vndb_sync_button.clicked.connect(lambda: self.sync_vndb_library(silent=False))
+        head.addWidget(self.vndb_sync_button)
+        self.vndb_all_button = QPushButton(tr("Fetch all info & ratings").replace("&", "&&"))
         self.vndb_all_button.setToolTip(
-            tr("Refresh titles, ratings and details for every game that "
-               "has a VNDB id"))
+            tr("Fetch metadata and ratings from VNDB, Bangumi, and ErogameScape for all games"))
         self.vndb_all_button.clicked.connect(self.fetch_all_vndb)
         head.addWidget(self.vndb_all_button)
         head.addSpacing(8)
+        self.filter_box = NoWheelCombo()
+        for label, key in (
+            ("All", "all"),
+            ("Manual", "manual"),
+            ("VNDB List", "vndb_list"),
+            ("Manual + VNDB", "both"),
+            ("VNDB only (synced)", "vndb_only"),
+            ("Linked (.exe)", "linked"),
+            ("Not linked", "unlinked"),
+            ("Playing", "Playing"),
+            ("Finished", "Finished"),
+            ("Stalled", "Stalled"),
+            ("Dropped", "Dropped"),
+            ("Wishlist", "Wishlist"),
+        ):
+            self.filter_box.addItem(tr(label), key)
+        saved_filter = (self.window.config.get("ui") or {}).get("library_filter", "all")
+        sync_on = bool(((self.window.config or {}).get("vndb") or {}).get("enable_list_sync", False))
+        fidx = self.filter_box.findData(saved_filter) if sync_on else 0
+        self.filter_box.blockSignals(True)
+        self.filter_box.setCurrentIndex(fidx if fidx >= 0 else 0)
+        self.filter_box.blockSignals(False)
+        self.filter_box.setMinimumWidth(136)
+        self.filter_box.currentIndexChanged.connect(self._filter_changed)
+        head.addWidget(self.filter_box)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("Search title, developer, exe…"))
-        self.search.setFixedWidth(240)
-        self.search.textChanged.connect(self.refresh)
+        self.search.setFixedWidth(220)
+        self.search.textChanged.connect(self._reset_and_refresh)
         head.addWidget(self.search)
         # list <-> covers, then refresh: both are 28 px icon buttons
         self.view_button = QToolButton()
@@ -1319,16 +1381,27 @@ class LibraryPage(Page):
         head.addWidget(self.refresh_button)
         outer.addLayout(head)
 
+        self.progress_row = QWidget()
+        prow = QHBoxLayout(self.progress_row)
+        prow.setContentsMargins(0, 0, 0, 0)
+        prow.setSpacing(8)
         self.vndb_progress = QProgressBar()
         self.vndb_progress.setTextVisible(False)
         self.vndb_progress.setFixedHeight(16)
-        self.vndb_progress.hide()
-        outer.addWidget(self.vndb_progress)
+        prow.addWidget(self.vndb_progress, 1)
+        self.stop_job_button = QPushButton(tr("Stop"))
+        self.stop_job_button.clicked.connect(self._stop_active_job)
+        prow.addWidget(self.stop_job_button)
+        self.progress_row.hide()
+        outer.addWidget(self.progress_row)
         self.vndb_notes = QLabel("")
         self.vndb_notes.setObjectName("sub")
         self.vndb_notes.hide()
         outer.addWidget(self.vndb_notes)
         self._vndb_thread = None
+        self._sync_thread = None
+        self._vndb_cancel = None
+        self._sync_cancel = None
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels([tr(name) for name in self.COLUMNS])
@@ -1351,8 +1424,9 @@ class LibraryPage(Page):
         self._remember_header = attach_column_tools(self.table, "library", self.window)
 
         self.empty_hint = QLabel(
-            "No games yet.\n\nUse “Add game”, or bring your 1.x data over with\n"
-            "Settings → General → “Import 1.x data…”")
+            "No games in your library yet.\n\n"
+            "Click “Add game” below to link a visual novel, enable VNDB sync in Settings → VNDB & Ratings,\n"
+            "or import an existing 1.x library in Settings → General.")
         self.empty_hint.setObjectName("sub")
         self.empty_hint.setAlignment(Qt.AlignCenter)
 
@@ -1368,6 +1442,37 @@ class LibraryPage(Page):
         outer.addWidget(self.empty_hint, 1)
         outer.addWidget(self.table, 1)
         outer.addWidget(self.grid_scroll, 1)
+
+        self.pager_row = QWidget()
+        pager = QHBoxLayout(self.pager_row)
+        pager.setContentsMargins(0, 0, 0, 0)
+        pager.setSpacing(8)
+        self.prev_page_btn = QPushButton("\u2039  " + tr("Prev"))
+        self.prev_page_btn.clicked.connect(lambda: self._step_page(-1))
+        pager.addWidget(self.prev_page_btn)
+        self.page_label = QLabel("")
+        self.page_label.setObjectName("sub")
+        pager.addWidget(self.page_label)
+        self.next_page_btn = QPushButton(tr("Next") + "  \u203a")
+        self.next_page_btn.clicked.connect(lambda: self._step_page(1))
+        pager.addWidget(self.next_page_btn)
+        pager.addStretch(1)
+        per_lbl = QLabel(tr("Per page:"))
+        per_lbl.setObjectName("sub")
+        pager.addWidget(per_lbl)
+        self.page_size_box = NoWheelCombo()
+        saved_size = (self.window.config.get("ui") or {}).get("library_page_size", 50)
+        try:
+            saved_size = int(saved_size)
+        except Exception:
+            saved_size = 50
+        for label, val in (("25", 25), ("50", 50), ("100", 100), ("200", 200), (tr("All"), 0)):
+            self.page_size_box.addItem(label, val)
+        pidx = self.page_size_box.findData(saved_size)
+        self.page_size_box.setCurrentIndex(pidx if pidx >= 0 else 1)
+        self.page_size_box.currentIndexChanged.connect(self._page_size_changed)
+        pager.addWidget(self.page_size_box)
+        outer.addWidget(self.pager_row)
 
         toolbar = QHBoxLayout()
         self.start_button = QPushButton(tr("Start"))
@@ -1415,6 +1520,7 @@ class LibraryPage(Page):
         self._live_timer.timeout.connect(self._live_refresh)
         self._apply_view(self._stored_view(), rebuild=False)
         self.update_icons()
+        self.update_vndb_controls()
         self.refresh()
 
     # ------------------------------------------------------------ chrome
@@ -1588,18 +1694,30 @@ class LibraryPage(Page):
             card.set_selected(card.game is game)
 
     # ------------------------------------------------------------ start menu
-    def _build_start_menu(self):
-        menu = QMenu(self)
-        menu.addAction("Start (normal)", self.start_selected)
+    def build_start_menu_for(self, get_game, parent=None, after_action=None):
+        """Reusable Start menu (normal + configured launchers + Manage launchers)."""
+        menu = QMenu(parent or self)
+
+        def _launch(launcher=None):
+            game = get_game() if callable(get_game) else get_game
+            if after_action is not None:
+                after_action(game, launcher)
+            else:
+                self.start_game(game, launcher=launcher)
+
+        menu.addAction(tr("Start (normal)"), lambda: _launch(None))
         launchers = (self.window.config.get("launchers") or [])
         if launchers:
             menu.addSeparator()
             for launcher in launchers:
                 menu.addAction(launcher.get("name", "launcher"),
-                               lambda item=launcher: self.start_with_launcher(item))
+                               lambda item=launcher: _launch(item))
         menu.addSeparator()
-        menu.addAction("Manage launchers…", self.window.goto_launchers)
+        menu.addAction(tr("Manage launchers…"), self.window.goto_launchers)
         return menu
+
+    def _build_start_menu(self):
+        return self.build_start_menu_for(self.selected, parent=self)
 
     def refresh_menu(self):
         self.start_button.setMenu(self._build_start_menu())
@@ -1618,47 +1736,228 @@ class LibraryPage(Page):
             except Exception:
                 pass
 
+    def _filter_changed(self, *_args):
+        val = self.filter_box.currentData() or "all"
+        self.window.config.setdefault("ui", {})["library_filter"] = val
+        try:
+            store.save_config(self.window.config)
+        except Exception:
+            pass
+        self._page = 1
+        self.refresh()
+
+    def _reset_and_refresh(self, *_args):
+        self._page = 1
+        self.refresh()
+
+    def _step_page(self, delta):
+        self._page = max(1, self._page + int(delta))
+        self.refresh()
+
+    def _page_size_changed(self, *_args):
+        val = self.page_size_box.currentData()
+        self.window.config.setdefault("ui", {})["library_page_size"] = val
+        try:
+            store.save_config(self.window.config)
+        except Exception:
+            pass
+        self._page = 1
+        self.refresh()
+
+    def _stop_active_job(self):
+        if self._sync_cancel is not None:
+            self._sync_cancel.set()
+        if self._vndb_cancel is not None:
+            self._vndb_cancel.set()
+        self.stop_job_button.setEnabled(False)
+        self.vndb_notes.setText(tr("Stopping…"))
+
     # ---------- data ----------
+    def update_vndb_controls(self):
+        """Show/hide optional VNDB sync controls based on Settings."""
+        vndb_cfg = (self.window.config or {}).get("vndb") or {}
+        sync_on = bool(vndb_cfg.get("enable_list_sync", False))
+        if hasattr(self, "vndb_sync_button"):
+            self.vndb_sync_button.setVisible(sync_on)
+        if hasattr(self, "filter_box"):
+            if not sync_on and self.filter_box.currentData() != "all":
+                self.filter_box.blockSignals(True)
+                self.filter_box.setCurrentIndex(0)
+                self.filter_box.blockSignals(False)
+            elif sync_on and not self.filter_box.isVisible():
+                saved_filter = ((self.window.config or {}).get("ui") or {}).get("library_filter", "all")
+                fidx = self.filter_box.findData(saved_filter)
+                if fidx >= 0:
+                    self.filter_box.blockSignals(True)
+                    self.filter_box.setCurrentIndex(fidx)
+                    self.filter_box.blockSignals(False)
+            self.filter_box.setVisible(sync_on)
+
+    def sync_vndb_library(self, silent=False):
+        """Fetch every game from the user's VNDB list and merge into Library."""
+        if getattr(self, "_sync_thread", None) is not None:
+            return
+        vndb_cfg = (self.window.config or {}).get("vndb") or {}
+        if not vndb_cfg.get("enable_list_sync", False):
+            if not silent:
+                QMessageBox.information(
+                    self, tr("VNDB Sync"),
+                    tr("VNDB library sync is disabled. Turn it on in Settings → VNDB & Ratings."))
+            return
+        token = (vndb_cfg.get("api_token") or "").strip()
+        if not token:
+            if not silent:
+                QMessageBox.warning(
+                    self, tr("VNDB Sync"),
+                    tr("Add your VNDB API token in Settings → VNDB & Ratings first."))
+            return
+        label_ids = list(vndb_cfg.get("sync_labels") or [])
+        self._sync_cancel = threading.Event()
+        cancel_ev = self._sync_cancel
+        self._sync_signals = VndbSyncSignals(self)
+        self._sync_signals.done.connect(
+            lambda entries, auth, err: self._on_sync_done(entries, auth, err, silent))
+        if hasattr(self, "vndb_sync_button"):
+            self.vndb_sync_button.setEnabled(False)
+        self.vndb_progress.setRange(0, 0)
+        self.stop_job_button.setEnabled(True)
+        self.progress_row.show()
+        self.vndb_notes.setText(tr("Syncing your VNDB list…"))
+        self.vndb_notes.show()
+        signals = self._sync_signals
+
+        def worker():
+            from .vndb import fetch_user_list
+            try:
+                entries, auth, err = fetch_user_list(
+                    token, label_ids=label_ids, cancel_event=cancel_ev)
+            except Exception as exc:
+                entries, auth, err = [], {}, str(exc)
+            signals.done.emit(entries, auth, err)
+
+        self._sync_thread = threading.Thread(target=worker, daemon=True)
+        self._sync_thread.start()
+
+    def _on_sync_done(self, entries, auth, error, silent=False):
+        self._sync_thread = None
+        self._sync_cancel = None
+        if hasattr(self, "vndb_sync_button"):
+            self.vndb_sync_button.setEnabled(True)
+        if self._vndb_thread is None:
+            self.progress_row.hide()
+        if error == "cancelled":
+            self.vndb_notes.setText(tr("VNDB sync stopped."))
+            QTimer.singleShot(5000, self.vndb_notes.hide)
+            return
+        if error:
+            self.vndb_notes.setText(tr("VNDB sync failed: %s") % error)
+            QTimer.singleShot(6000, self.vndb_notes.hide)
+            if not silent:
+                QMessageBox.warning(self, tr("VNDB Sync"), error)
+            return
+        by_id = {}
+        for g in self.engine.games:
+            vid = (g.get("vndb_id") or "").strip().lower()
+            if vid and vid not in by_id:
+                by_id[vid] = g
+        added, updated = 0, 0
+        for info in entries or []:
+            vid = (info.get("id") or "").strip().lower()
+            if not vid:
+                continue
+            existing = by_id.get(vid)
+            if existing is not None:
+                changed = merge_vndb(existing, info)
+                if not existing.get("image") and info.get("image"):
+                    existing["image"] = info["image"]
+                    changed = True
+                if "manual" not in existing:
+                    existing["manual"] = True
+                    changed = True
+                if not existing.get("vndb_synced"):
+                    existing["vndb_synced"] = True
+                    changed = True
+                if changed:
+                    updated += 1
+            else:
+                new_game = {
+                    "exe": "",
+                    "vndb_id": vid,
+                    "title": info.get("title") or vid,
+                    "original": info.get("original") or info.get("title") or vid,
+                    "romanized": info.get("romanized") or "",
+                    "image": info.get("image") or "",
+                    "developer": info.get("developer") or "Unknown",
+                    "year": info.get("year") or "????",
+                    "rating_average": info.get("rating_average") or "N/A",
+                    "rating_weighted": info.get("rating_weighted") or "N/A",
+                    "vndb_votes": info.get("vndb_votes") or "N/A",
+                    "vndb_labels": list(info.get("vndb_labels") or []),
+                    "vndb_vote": info.get("vndb_vote") or "",
+                    "vndb_started": info.get("vndb_started") or "",
+                    "vndb_finished": info.get("vndb_finished") or "",
+                    "vndb_notes": info.get("vndb_notes") or "",
+                    "vndb_synced": True,
+                    "manual": False,
+                    "process_names": [],
+                    "total_seconds": 0,
+                }
+                self.engine.games.append(new_game)
+                by_id[vid] = new_game
+                added += 1
+        if added or updated:
+            store.save_games(self.engine.games)
+            self.refresh()
+            self.window.now_page.update_from_engine()
+        self.vndb_notes.setText(
+            tr("Synced %d game(s) from VNDB (%d added, %d updated).")
+            % (len(entries or []), added, updated))
+        QTimer.singleShot(6000, self.vndb_notes.hide)
+
     def fetch_all_vndb(self):
-        """Refresh title/rating/cover for every game that has a VNDB id."""
+        """Refresh metadata and platform ratings for active library games."""
         if self._vndb_thread is not None:
             return
+        sync_on = bool(((self.window.config or {}).get("vndb") or {}).get("enable_list_sync", False))
         games = [g for g in self.engine.games
-                 if (g.get("vndb_id") or "").strip()]
+                 if (sync_on or bool(g.get("manual", True)))
+                 and ((g.get("vndb_id") or "").strip()
+                      or (g.get("original") or g.get("title") or "").strip())]
         if not games:
             QMessageBox.information(self, tr("VNDB"),
-                                    tr("No game has a VNDB id yet."))
+                                    tr("No games in the library yet."))
             return
+        self._vndb_cancel = threading.Event()
+        cancel_ev = self._vndb_cancel
         self._vndb_signals = VndbSignals(self)
         self._vndb_signals.progress.connect(self._on_vndb_progress)
         self._vndb_signals.finished.connect(self._on_vndb_done)
         self.vndb_all_button.setEnabled(False)
         self.vndb_progress.setRange(0, len(games))
         self.vndb_progress.setValue(0)
-        self.vndb_progress.show()
+        self.stop_job_button.setEnabled(True)
+        self.progress_row.show()
         self.vndb_notes.setText(
-            tr("Refreshing %d game(s) from VNDB…") % len(games))
+            tr("Refreshing %d game(s) from VNDB & rating sites…") % len(games))
         self.vndb_notes.show()
         signals = self._vndb_signals
         app = self.window.app
+        cfg = self.window.config or {}
+        rcfg = cfg.get("ratings") or {}
+        token = ((cfg.get("vndb") or {}).get("api_token") or "").strip()
 
         def worker():
-            results = []
-            failed = 0
-            first_error = ""
-            for index, game in enumerate(games):
-                try:
-                    info = app.fetch_vndb(
-                        (game.get("vndb_id") or "").strip().lower())
-                except Exception as error:      # one bad id is not fatal
-                    info = None
-                    if not first_error:
-                        first_error = str(error)
-                if info:
-                    results.append((game, info))
-                else:
-                    failed += 1
-                signals.progress.emit(index + 1, len(games))
+            from .ratings import fetch_bulk_ratings
+            results, failed, first_error = fetch_bulk_ratings(
+                games,
+                token=token,
+                fetch_vndb_rank=bool(rcfg.get("fetch_vndb_rank", True)),
+                fetch_bangumi_flag=bool(rcfg.get("fetch_bangumi", True)),
+                fetch_egs_flag=bool(rcfg.get("fetch_erogamescape", True)),
+                cancel_event=cancel_ev,
+                progress_cb=lambda done, total: signals.progress.emit(done, total),
+                max_workers=6,
+            )
             signals.finished.emit(results, failed, first_error)
 
         self._vndb_thread = threading.Thread(target=worker, daemon=True)
@@ -1670,9 +1969,14 @@ class LibraryPage(Page):
             tr("Refreshing %d of %d game(s)…") % (done, total))
 
     def _on_vndb_done(self, results, failed, error):
+        was_cancelled = (error == "cancelled") or (
+            self._vndb_cancel is not None and self._vndb_cancel.is_set()
+        )
         self._vndb_thread = None
+        self._vndb_cancel = None
         self.vndb_all_button.setEnabled(True)
-        self.vndb_progress.hide()
+        if self._sync_thread is None:
+            self.progress_row.hide()
         updated = 0
         for game, info in results or []:
             if merge_vndb(game, info):
@@ -1681,15 +1985,18 @@ class LibraryPage(Page):
             store.save_games(self.engine.games)
             self.refresh()
             self.window.now_page.update_from_engine()
-        if updated:
+        if was_cancelled:
             self.vndb_notes.setText(
-                tr("Updated %d game(s) from VNDB.") % updated)
+                tr("Stopped (%d game(s) updated).") % updated)
+        elif updated:
+            self.vndb_notes.setText(
+                tr("Updated %d game(s) from VNDB & rating sites.") % updated)
         elif failed:
             self.vndb_notes.setText(
                 tr("Could not refresh %d game(s).") % failed)
         else:
             self.vndb_notes.setText(tr("Nothing needed updating."))
-        if error:
+        if error and not was_cancelled:
             self.vndb_notes.setToolTip(error)
         QTimer.singleShot(6000, self.vndb_notes.hide)
 
@@ -1743,33 +2050,93 @@ class LibraryPage(Page):
 
     def refresh(self):
         from .core import format_time
+        self.update_vndb_controls()
+        sync_on = bool(((self.window.config or {}).get("vndb") or {}).get("enable_list_sync", False))
         needle = (self.search.text() or "").strip().lower()
+        mode = self.filter_box.currentData() if hasattr(self, "filter_box") else "all"
         self._last_read = self._read_last_read()
         games = []
         for game in self.engine.games:
+            is_manual = bool(game.get("manual", True))
+            is_synced = bool(game.get("vndb_synced", False))
+            if not sync_on and not is_manual:
+                continue
+            has_exe = bool((game.get("exe") or "").strip())
+            if mode == "manual" and not is_manual:
+                continue
+            elif mode == "vndb_list" and not is_synced:
+                continue
+            elif mode == "both" and not (is_manual and is_synced):
+                continue
+            elif mode == "vndb_only" and not (is_synced and not is_manual):
+                continue
+            elif mode == "linked" and not has_exe:
+                continue
+            elif mode == "unlinked" and has_exe:
+                continue
+            elif mode in ("Playing", "Finished", "Stalled", "Dropped", "Wishlist"):
+                labels = [str(x) for x in (game.get("vndb_labels") or [])]
+                if mode not in labels:
+                    continue
             blob = " ".join(str(game.get(key, "")) for key in
                             ("original", "title", "romanized", "developer", "year",
                              "vndb_id", "exe")).lower()
             if needle and needle not in blob:
                 continue
             games.append(game)
-        self.window.visible_games = games
-        self.table.setRowCount(len(games))
-        for row, game in enumerate(games):
+
+        self._filtered_games = games
+        total_games = len(games)
+        page_size = int(self.page_size_box.currentData() or 0) if hasattr(self, "page_size_box") else 50
+        if page_size > 0 and total_games > 0:
+            total_pages = max(1, (total_games + page_size - 1) // page_size)
+            self._page = max(1, min(self._page, total_pages))
+            start_idx = (self._page - 1) * page_size
+            page_games = games[start_idx:start_idx + page_size]
+        else:
+            total_pages = 1
+            self._page = 1
+            page_games = games
+
+        if hasattr(self, "pager_row"):
+            self.pager_row.setVisible(total_games > 0)
+            self.page_label.setText(
+                tr("Page %d / %d  \u00b7  %d game(s)") % (self._page, total_pages, total_games))
+            self.prev_page_btn.setEnabled(self._page > 1)
+            self.next_page_btn.setEnabled(self._page < total_pages)
+
+        self.window.visible_games = page_games
+        self.table.setRowCount(len(page_games))
+        for row, game in enumerate(page_games):
             total = game.get("total_seconds", 0)
             if self.engine.game is game:
                 total = self.engine.total_seconds     # includes the open stretch
+            raw_exe = (game.get("exe") or "").strip()
+            exe_cell = Path(raw_exe).name if raw_exe else tr("Not linked")
             cells = (self.display_title(game), format_time(total),
-                     self.last_read_text(game), Path(game.get("exe", "")).name)
+                     self.last_read_text(game), exe_cell)
+            is_manual = bool(game.get("manual", True))
+            is_synced = bool(game.get("vndb_synced", False))
+            if is_manual and is_synced:
+                source_tag = tr("Manual + VNDB List")
+            elif is_manual:
+                source_tag = tr("Manual")
+            else:
+                source_tag = tr("Synced from VNDB")
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if column == 0:
-                    item.setToolTip("%s\n%s | %s\n%s"
-                                    % (text, game.get("developer") or "?",
-                                       game.get("year") or "?", game.get("exe") or ""))
+                    ratings = format_ratings_summary(game)
+                    tip = "%s\n%s | %s  \u00b7  %s\n%s" % (
+                        text, game.get("developer") or "?",
+                        game.get("year") or "?", source_tag,
+                        raw_exe or tr("Synced from VNDB — edit to link an .exe"))
+                    if ratings:
+                        tip += "\n" + ratings
+                    item.setToolTip(tip)
                 self.table.setItem(row, column, item)
         if hasattr(self, "empty_hint"):
-            self.empty_hint.setVisible(not games)
+            self.empty_hint.setVisible(not page_games)
         self._apply_view(self.view_mode, rebuild=True)
 
     # ---------- actions ----------
@@ -1788,6 +2155,9 @@ class LibraryPage(Page):
         dialog = GameEditorDialog(self.window, game)
         if dialog.exec():
             store.save_games(self.window.engine.games)
+            if hasattr(self.window.engine, "refresh_active_preview"):
+                self.window.engine.refresh_active_preview()
+            self.window.now_page._stamp = None
             self.refresh()
             self.window.now_page.update_from_engine()
 
@@ -1809,7 +2179,16 @@ class LibraryPage(Page):
         self.remove_game(self.selected())
 
     def _exe_ok(self, game):
-        exe = Path(game.get("exe", ""))
+        raw = (game.get("exe") or "").strip()
+        if not raw:
+            answer = QMessageBox.question(
+                self, tr("Start"),
+                tr("This game does not have an executable linked yet.\n\n"
+                   "Open the editor to pick its .exe now?"))
+            if answer == QMessageBox.Yes:
+                self.edit_game(game)
+            return None
+        exe = Path(raw)
         if not exe.exists():
             QMessageBox.warning(self, "Start", "Executable not found:\n%s" % exe)
             return None
@@ -1893,7 +2272,12 @@ class LibraryPage(Page):
         """Reveal one game's .exe in Explorer."""
         if not game:
             return
-        target = Path(game.get("exe") or "")
+        raw = (game.get("exe") or "").strip()
+        if not raw:
+            QMessageBox.information(self, tr("Open in folder"),
+                                    tr("No executable linked yet."))
+            return
+        target = Path(raw)
         if target.is_file():
             try:
                 # /select, opens the folder with the file highlighted
@@ -2040,6 +2424,11 @@ class NowPage(Page):
         self.meta_label = QLabel("")
         self.meta_label.setObjectName("sub")
         column.addWidget(self.meta_label)
+        self.ratings_label = QLabel("")
+        self.ratings_label.setObjectName("sub")
+        self.ratings_label.setWordWrap(True)
+        self.ratings_label.setVisible(False)
+        column.addWidget(self.ratings_label)
 
         self.status_chip = QLabel("")
         self.status_chip.setObjectName("chip")
@@ -2235,9 +2624,11 @@ class NowPage(Page):
         # rebuilding every label (and restyling the presence button) once a
         # second was most of the idle CPU cost; nothing to do while the state
         # is identical, and the clock has its own timer.
+        ratings_line = format_ratings_summary(engine.game)
         stamp = (engine.status, id(engine.game), getattr(engine, "total_seconds", None),
                  engine.last_error, engine.presence_enabled,
                  getattr(engine, "record_time", True),
+                 ratings_line,
                  repr(engine.preview))
         if stamp == getattr(self, "_stamp", None):
             return
@@ -2257,9 +2648,21 @@ class NowPage(Page):
             "padding:7px 14px;font-weight:600;}"
             % (theme["green"] if recorded else theme["red"], "#ffffff"))
         preview = self.engine.preview or {}
+        if not preview and self.engine.game is not None:
+            try:
+                preview = self.engine._build_preview(
+                    self.engine.game, self.engine.status or "Paused"
+                )
+                self.engine.preview = preview
+            except Exception:
+                preview = {}
+        if time.time() - self._pin_stamp > 6:
+            self._refresh_pin_box()
         if not preview:
             self.title_label.setText(tr("No game yet"))
-            self.meta_label.setText(tr("Launch a game from the library and it shows up here."))
+            self.meta_label.setText(tr("Start any game in your library and it will appear here automatically."))
+            self.ratings_label.setText("")
+            self.ratings_label.setVisible(False)
             self.status_chip.setText("")
             self.total_label.setText("")
             self.session_label.setText("")
@@ -2289,7 +2692,9 @@ class NowPage(Page):
         self.title_label.setText(preview.get("title") or "")
         self.meta_label.setText("%s  \u00b7  %s"
                                 % (game.get("developer") or "Unknown",
-                                   Path(game.get("exe", "")).name))
+                                   Path(game.get("exe", "")).name if game.get("exe") else tr("Not linked")))
+        self.ratings_label.setText(ratings_line)
+        self.ratings_label.setVisible(bool(ratings_line))
         status = preview.get("status") or ""
         self.status_chip.setVisible(True)
         self.total_label.setVisible(True)
@@ -2512,7 +2917,7 @@ def menu_qss(window):
     values = dict(getattr(window, "palette", None) or {})
     values.setdefault("menuarrow", menu_arrow_icon_path())
     return MENU_QSS % values
-APP_VERSION = "2.3.5"          # shown in Settings -> Updates and used by the update check
+APP_VERSION = "2.4.0"          # shown in Settings -> Updates and used by the update check
 
 CHART_COLOURS = ("#e64980", "#f0a020", "#4d5bf0", "#2fa8f0", "#7ad1c8",
                  "#c9a227", "#ef6b3a", "#e0413a", "#8f6fe8", "#3ba55d",
@@ -2891,15 +3296,16 @@ class StatsPage(Page):
         self.all_button.setCursor(Qt.PointingHandCursor)
         self.all_button.clicked.connect(lambda: self._set_range("all"))
         self._refresh_range_button()
-        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button = QPushButton(tr("Refresh"))
         self.refresh_button.clicked.connect(lambda: self.refresh(flush=True))
         head.addWidget(self.refresh_button)
-        self.sessions_button = QPushButton("All Sessions\u2026")
+        self.sessions_button = QPushButton(tr("All Sessions\u2026"))
         self.sessions_button.clicked.connect(self.open_sessions)
         head.addWidget(self.sessions_button)
-        self.export_button = QPushButton("Export CSV\u2026")
-        self.export_button.clicked.connect(self.export_csv)
-        head.addWidget(self.export_button)
+        self.share_button = QPushButton(tr("Share\u2026"))
+        self.share_button.setObjectName("primary")
+        self.share_button.clicked.connect(self.open_share_dialog)
+        head.addWidget(self.share_button)
         content.addLayout(head)
 
         range_row = QHBoxLayout()
@@ -2987,8 +3393,9 @@ class StatsPage(Page):
         outer.addWidget(self.scroll, 1)
 
         self._auto = QTimer(self)
-        self._auto.setInterval(500)
-        self._auto.timeout.connect(self.refresh)
+        self._auto.setInterval(2000)
+        self._auto.timeout.connect(self._auto_refresh)
+        self._theme_dirty = False
         self.refresh()
 
     # ---------- range ----------
@@ -3130,11 +3537,18 @@ class StatsPage(Page):
     # ---------- lifecycle ----------
     def showEvent(self, event):
         super().showEvent(event)
-        self._auto.start(500)
+        if getattr(self, "_theme_dirty", False):
+            self._theme_dirty = False
+            self.refresh()
+        self._auto.start(2000)
 
     def hideEvent(self, event):
         self._auto.stop()
         super().hideEvent(event)
+
+    def _auto_refresh(self):
+        if self.isVisible() and self.engine.game is not None and self.engine.status == "Reading":
+            self.refresh()
 
     # ---------- data ----------
     def refresh(self, flush=False):
@@ -3185,6 +3599,7 @@ class StatsPage(Page):
                         % (day_from, day_to, tr("%d days") % days))
         self._sync_date_buttons()
         self._update_chart(stats, start, end, days, live, live_game)
+        self._last_stats = (start, end, days, seconds, sessions, self._rows_as_dicts(rows))
         self._render(rows, seconds)
 
     def _update_chart(self, stats, start, end, days, live=0.0, live_game=None):
@@ -3381,9 +3796,13 @@ class StatsPage(Page):
             cover.setFixedSize(90, 120)
             cover.setAlignment(Qt.AlignCenter)
             layout.addWidget(cover, 0, Qt.AlignHCenter)
-            name = QLabel(game["title"] or game["vndb_id"])
-            name.setWordWrap(True)
-            name.setFixedHeight(34)
+            full_title = game["title"] or game["vndb_id"]
+            name = QLabel("")
+            name.setWordWrap(False)
+            name.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            name.setText(self._fit_two_lines(name.fontMetrics(), full_title, 124))
+            name.setToolTip(full_title)
+            name.setFixedHeight(38)
             layout.addWidget(name)
             read = QLabel(format_time(game["seconds"]))
             read.setObjectName("h3")
@@ -3495,12 +3914,890 @@ class StatsPage(Page):
             return
         label.setPixmap(scaled_for(image, 90, 120, label))
 
+    @staticmethod
+    def _fit_two_lines(metrics, text, max_width):
+        """Wrap `text` into at most two lines with right ellipsis on the second."""
+        s = str(text or "").strip()
+        if not s:
+            return ""
+        if metrics.horizontalAdvance(s) <= max_width:
+            return s
+        # Walk characters greedily for line 1; break on space when convenient.
+        cut = len(s)
+        for i in range(1, len(s) + 1):
+            if metrics.horizontalAdvance(s[:i]) > max_width:
+                cut = max(1, i - 1)
+                break
+        space_pos = s.rfind(" ", 1, cut)
+        if space_pos > cut // 2:
+            cut = space_pos
+        line1 = s[:cut].rstrip()
+        rest = s[cut:].lstrip()
+        if not rest:
+            return line1
+        line2 = metrics.elidedText(rest, Qt.ElideRight, max_width)
+        return f"{line1}\n{line2}"
+
+    def _cached_cover_image(self, url):
+        if not url:
+            return None
+        cached = self.app.cover_cache.get(url)
+        if cached is not None and not cached.isNull():
+            return cached
+        raw = cover_bytes_from_disk(url)
+        if raw:
+            from PySide6.QtGui import QImage
+            img = QImage()
+            if img.loadFromData(raw):
+                return img
+        return None
+
+    def _share_palette(self, theme_mode="auto"):
+        mode = str(theme_mode or "auto").lower()
+        if mode == "dark":
+            return dict(DARK)
+        if mode == "light":
+            return dict(LIGHT)
+        return dict(self.window.palette)
+
+    @staticmethod
+    def _share_preset_layout(preset="stacked", top_n=8):
+        """Return default (canvas_w, canvas_h, blocks) for a named preset."""
+        top_n = max(1, min(12, int(top_n or 8)))
+        if preset == "two_col":
+            cw = 1040
+            list_h = max(360, top_n * 54 + 54)
+            ch = max(560, 108 + list_h + 24)
+            left_w = 432
+            right_x = 28 + left_w + 20
+            right_w = cw - right_x - 28
+            chart_h = max(210, ch - 232)
+            return cw, ch, {
+                "header": {"x": 28, "y": 24, "w": cw - 56, "h": 62, "visible": True},
+                "metrics": {"x": 28, "y": 100, "w": left_w, "h": 92, "visible": True},
+                "chart": {"x": 28, "y": 208, "w": left_w, "h": chart_h, "visible": True},
+                "list": {"x": right_x, "y": 100, "w": right_w, "h": ch - 124, "visible": True},
+            }
+        if preset == "banner":
+            cw, ch = 1120, 520
+            return cw, ch, {
+                "header": {"x": 28, "y": 22, "w": 520, "h": 62, "visible": True},
+                "metrics": {"x": 564, "y": 20, "w": 528, "h": 84, "visible": True},
+                "chart": {"x": 28, "y": 116, "w": 520, "h": 376, "visible": True},
+                "list": {"x": 564, "y": 116, "w": 528, "h": 376, "visible": True},
+            }
+        # Default: classic stacked vertical layout
+        cw = 880
+        list_h = max(180, top_n * 60 + 52)
+        ch = 24 + 60 + 16 + 88 + 16 + 164 + 16 + list_h + 28
+        return cw, ch, {
+            "header": {"x": 28, "y": 24, "w": cw - 56, "h": 60, "visible": True},
+            "metrics": {"x": 28, "y": 100, "w": cw - 56, "h": 88, "visible": True},
+            "chart": {"x": 28, "y": 204, "w": cw - 56, "h": 164, "visible": True},
+            "list": {"x": 28, "y": 384, "w": cw - 56, "h": list_h, "visible": True},
+        }
+
+    def _normalize_share_opts(self, opts=None):
+        cfg_opts = ((self.window.config or {}).get("ui") or {}).get("share_options") or {}
+        top_n = max(1, min(12, int((opts or {}).get("top_n", cfg_opts.get("top_n", 8)) or 8)))
+        def_w, def_h, def_blocks = self._share_preset_layout("stacked", top_n=top_n)
+        merged = {
+            "canvas_w": int(cfg_opts.get("canvas_w", def_w) or def_w),
+            "canvas_h": int(cfg_opts.get("canvas_h", def_h) or def_h),
+            "blocks": {},
+            "show_covers": bool(cfg_opts.get("show_covers", True)),
+            "top_n": top_n,
+            "theme": str(cfg_opts.get("theme", "auto") or "auto"),
+            "snap": bool(cfg_opts.get("snap", True)),
+        }
+        src_blocks = cfg_opts.get("blocks") if isinstance(cfg_opts.get("blocks"), dict) else {}
+        if opts:
+            for k, v in opts.items():
+                if k != "blocks":
+                    merged[k] = v
+            if isinstance(opts.get("blocks"), dict):
+                src_blocks = opts["blocks"]
+        cw = max(560, min(1400, int(merged.get("canvas_w", def_w) or def_w)))
+        ch = max(320, min(1800, int(merged.get("canvas_h", def_h) or def_h)))
+        merged["canvas_w"] = cw
+        merged["canvas_h"] = ch
+        clean_blocks = {}
+        for key, dflt in def_blocks.items():
+            raw = src_blocks.get(key) if isinstance(src_blocks.get(key), dict) else {}
+            bx = int(raw.get("x", dflt["x"]))
+            by = int(raw.get("y", dflt["y"]))
+            bw = max(160, min(cw - 16, int(raw.get("w", dflt["w"]))))
+            bh = max(52, min(ch - 16, int(raw.get("h", dflt["h"]))))
+            bx = max(8, min(cw - bw - 8, bx))
+            by = max(8, min(ch - bh - 8, by))
+            vis_default = dflt["visible"]
+            if key == "metrics" and "show_metrics" in (opts or {}):
+                vis_default = bool(opts["show_metrics"])
+            elif key == "chart" and "show_chart" in (opts or {}):
+                vis_default = bool(opts["show_chart"])
+            elif key == "list" and "show_list" in (opts or {}):
+                vis_default = bool(opts["show_list"])
+            clean_blocks[key] = {
+                "x": bx, "y": by, "w": bw, "h": bh,
+                "visible": bool(raw.get("visible", vis_default)),
+            }
+        merged["blocks"] = clean_blocks
+        return merged
+
+    def draw_share_canvas(self, painter, opt):
+        """Draw the entire share layout onto `painter` in canvas coordinates (0..cw, 0..ch)."""
+        from .core import format_time
+        from PySide6.QtGui import QFont, QPainterPath
+
+        self._refresh_body(flush=False)
+        start, end, days, total_secs, sessions, games = getattr(
+            self, "_last_stats", (self._range()[0], self._range()[1], 1, 0, 0, [])
+        )
+        games_sorted = sorted(games or [], key=lambda g: -(g.get("seconds") or 0))
+        top_n = max(1, min(12, int(opt.get("top_n", 8) or 8)))
+        top_games = games_sorted[:top_n]
+        chart_bars = list(getattr(self.chart, "days", []) or [])
+        show_covers = bool(opt.get("show_covers", True))
+
+        p = self._share_palette(opt.get("theme", "auto"))
+        bg = QColor(p["bg"])
+        surface = QColor(p["surface"])
+        surface2 = QColor(p["surface2"])
+        border = QColor(p["border"])
+        text_col = QColor(p["text"])
+        sub_col = QColor(p["subtext"])
+
+        cw, ch = int(opt["canvas_w"]), int(opt["canvas_h"])
+        painter.fillRect(0, 0, cw, ch, bg)
+
+        f_title = QFont("Segoe UI", 18, QFont.Bold)
+        f_sub = QFont("Segoe UI", 10)
+        f_caps = QFont("Segoe UI", 8, QFont.Bold)
+        f_metric = QFont("Segoe UI", 16, QFont.Bold)
+        f_row = QFont("Segoe UI", 10, QFont.DemiBold)
+
+        blocks = opt.get("blocks") or {}
+
+        # 1. Header block
+        hb = blocks.get("header") or {}
+        if hb.get("visible", True):
+            hx, hy, hw, hh = hb["x"], hb["y"], hb["w"], hb["h"]
+            painter.save()
+            painter.setClipRect(QRectF(hx, hy, hw, hh))
+            painter.setFont(f_title)
+            painter.setPen(text_col)
+            painter.drawText(QRectF(hx, hy, hw, 32), Qt.AlignLeft | Qt.AlignVCenter,
+                             tr("Reading Statistics"))
+            painter.setFont(f_sub)
+            painter.setPen(sub_col)
+            range_desc = "%s  ·  %s → %s (%s)" % (
+                self._range_label(), start.isoformat(), end.isoformat(), tr("%d days") % days
+            )
+            elided_r = painter.fontMetrics().elidedText(range_desc, Qt.ElideRight, int(hw))
+            painter.drawText(QRectF(hx, hy + 30, hw, 24), Qt.AlignLeft | Qt.AlignVCenter, elided_r)
+            painter.restore()
+
+        # 2. Summary metrics block (auto-adapts horizontal 3-col vs stacked vertical!)
+        mb = blocks.get("metrics") or {}
+        if mb.get("visible", True):
+            mx, my, mw, mh = mb["x"], mb["y"], mb["w"], mb["h"]
+            metrics_data = (
+                (tr("TIME READ"), format_time(total_secs)),
+                (tr("VISUAL NOVELS"), str(len(games_sorted))),
+                (tr("SESSIONS"), str(sessions)),
+            )
+            painter.save()
+            painter.setClipRect(QRectF(mx, my, mw, mh))
+            if mw >= 360 or mw >= mh * 1.4:
+                gap = 10
+                card_w = (mw - gap * 2) / 3.0
+                for idx, (cap, val) in enumerate(metrics_data):
+                    cx = mx + idx * (card_w + gap)
+                    rect = QRectF(cx, my, card_w, mh)
+                    painter.setPen(border)
+                    painter.setBrush(surface)
+                    painter.drawRoundedRect(rect, 10, 10)
+                    painter.setFont(f_caps)
+                    painter.setPen(sub_col)
+                    painter.drawText(QRectF(cx + 12, my + 10, card_w - 24, 18), Qt.AlignLeft | Qt.AlignVCenter, cap)
+                    painter.setFont(f_metric if card_w >= 130 else QFont("Segoe UI", 13, QFont.Bold))
+                    painter.setPen(text_col)
+                    val_el = painter.fontMetrics().elidedText(val, Qt.ElideRight, int(max(40, card_w - 24)))
+                    painter.drawText(QRectF(cx + 12, my + 30, card_w - 24, max(24, mh - 36)),
+                                     Qt.AlignLeft | Qt.AlignVCenter, val_el)
+            else:
+                gap = 8
+                card_h = max(36.0, (mh - gap * 2) / 3.0)
+                for idx, (cap, val) in enumerate(metrics_data):
+                    cy = my + idx * (card_h + gap)
+                    rect = QRectF(mx, cy, mw, card_h)
+                    painter.setPen(border)
+                    painter.setBrush(surface)
+                    painter.drawRoundedRect(rect, 10, 10)
+                    painter.setFont(f_caps)
+                    painter.setPen(sub_col)
+                    painter.drawText(QRectF(mx + 12, cy + 6, mw - 24, 16), Qt.AlignLeft | Qt.AlignVCenter, cap)
+                    painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
+                    painter.setPen(text_col)
+                    painter.drawText(QRectF(mx + 12, cy + 20, mw - 24, max(18, card_h - 24)),
+                                     Qt.AlignLeft | Qt.AlignVCenter, val)
+            painter.restore()
+
+        # 3. Activity chart block
+        cb = blocks.get("chart") or {}
+        if cb.get("visible", True):
+            cx, cy, cw_b, ch_b = cb["x"], cb["y"], cb["w"], cb["h"]
+            painter.save()
+            painter.setClipRect(QRectF(cx, cy, cw_b, ch_b))
+            painter.setPen(border)
+            painter.setBrush(surface)
+            painter.drawRoundedRect(QRectF(cx, cy, cw_b, ch_b), 10, 10)
+            painter.setFont(f_caps)
+            painter.setPen(sub_col)
+            painter.drawText(QRectF(cx + 14, cy + 10, cw_b - 28, 18),
+                             Qt.AlignLeft | Qt.AlignVCenter, self.chart_title.text())
+            if chart_bars:
+                plot_x, plot_y = cx + 16, cy + 34
+                plot_w, plot_h = max(20, cw_b - 32), max(24, ch_b - 58)
+                max_day = max((sum(v for _, v in segs) for _, segs in chart_bars), default=1) or 1
+                colours = getattr(self.chart, "colours", {}) or {}
+                n_bars = max(1, len(chart_bars))
+                step = plot_w / n_bars
+                bw = max(2.5, min(28.0, step * 0.68))
+                for i, (_lbl, segs) in enumerate(chart_bars):
+                    bx = plot_x + i * step + (step - bw) / 2.0
+                    cur_y = plot_y + plot_h
+                    for key, secs in segs:
+                        if secs <= 0:
+                            continue
+                        bh = (secs / max_day) * plot_h
+                        cur_y -= bh
+                        col = QColor(colours.get(key) or CHART_COLOURS[0])
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(col)
+                        painter.drawRoundedRect(QRectF(bx, cur_y, bw, max(1.5, bh)), 2, 2)
+                painter.setFont(QFont("Segoe UI", 8))
+                painter.setPen(sub_col)
+                painter.drawText(QRectF(plot_x, cy + ch_b - 22, 120, 18), Qt.AlignLeft, chart_bars[0][0])
+                if len(chart_bars) > 1:
+                    painter.drawText(QRectF(plot_x + plot_w - 120, cy + ch_b - 22, 120, 18),
+                                     Qt.AlignRight, chart_bars[-1][0])
+            else:
+                painter.setFont(f_sub)
+                painter.drawText(QRectF(cx + 14, cy + 34, cw_b - 28, max(24, ch_b - 44)),
+                                 Qt.AlignCenter, tr("Nothing recorded in this range yet."))
+            painter.restore()
+
+        # 4. Most Read VNs block
+        lb = blocks.get("list") or {}
+        if lb.get("visible", True):
+            lx, ly, lw, lh = lb["x"], lb["y"], lb["w"], lb["h"]
+            painter.save()
+            painter.setClipRect(QRectF(lx, ly, lw, lh))
+            painter.setPen(border)
+            painter.setBrush(surface)
+            painter.drawRoundedRect(QRectF(lx, ly, lw, lh), 10, 10)
+            painter.setFont(f_caps)
+            painter.setPen(sub_col)
+            painter.drawText(QRectF(lx + 16, ly + 12, lw - 32, 18),
+                             Qt.AlignLeft | Qt.AlignVCenter, tr("MOST READ VISUAL NOVELS"))
+            if not top_games:
+                painter.setFont(f_sub)
+                painter.drawText(QRectF(lx + 16, ly + 38, lw - 32, max(28, lh - 48)),
+                                 Qt.AlignCenter, tr("Nothing recorded in this range yet."))
+            else:
+                avail_h = max(44, lh - 44)
+                row_h = min(62.0, max(38.0, avail_h / max(1, len(top_games))))
+                ry = ly + 36.0
+                max_vn_secs = max((g.get("seconds") or 0) for g in top_games) or 1
+                thumb_h = max(26.0, min(46.0, row_h - 12.0))
+                thumb_w = thumb_h * 0.75
+                for i, g in enumerate(top_games):
+                    if ry + row_h * 0.55 > ly + lh - 4:
+                        break
+                    col_bar = QColor(CHART_COLOURS[i % len(CHART_COLOURS)])
+                    if show_covers and lw >= 260:
+                        thumb_rect = QRectF(lx + 16, ry + (row_h - thumb_h) / 2.0, thumb_w, thumb_h)
+                        url = self._cover_for(g.get("vndb_id"))
+                        cimg = self._cached_cover_image(url)
+                        if cimg is not None:
+                            clip_p = QPainterPath()
+                            clip_p.addRoundedRect(thumb_rect, 4, 4)
+                            painter.save()
+                            painter.setClipPath(clip_p)
+                            scaled = cimg.scaled(int(thumb_w), int(thumb_h),
+                                                 Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                            painter.drawImage(thumb_rect, scaled)
+                            painter.restore()
+                        else:
+                            painter.setPen(border)
+                            painter.setBrush(surface2)
+                            painter.drawRoundedRect(thumb_rect, 4, 4)
+                            painter.setFont(f_caps)
+                            painter.setPen(sub_col)
+                            painter.drawText(thumb_rect, Qt.AlignCenter, f"#{i+1}")
+                        tx = lx + 16 + thumb_w + 12
+                        tw = max(80.0, lw - (tx - lx) - 16)
+                    else:
+                        tx = lx + 16
+                        tw = max(80.0, lw - 32)
+
+                    title_str = g.get("title") or g.get("vndb_id") or tr("Untitled")
+                    time_str = "%s  ·  %.1f%%" % (
+                        format_time(g.get("seconds") or 0),
+                        100.0 * (g.get("seconds") or 0) / total_secs if total_secs else 0.0,
+                    )
+                    painter.setFont(f_row if row_h >= 46 else QFont("Segoe UI", 9, QFont.DemiBold))
+                    painter.setPen(text_col)
+                    fm_t = painter.fontMetrics()
+                    time_w = min(155.0, tw * 0.42)
+                    elided = fm_t.elidedText(title_str, Qt.ElideRight, int(max(30, tw - time_w - 8)))
+                    painter.drawText(QRectF(tx, ry + 4, tw - time_w - 4, 20), Qt.AlignLeft | Qt.AlignVCenter, elided)
+                    painter.setPen(sub_col)
+                    painter.drawText(QRectF(tx + tw - time_w, ry + 4, time_w, 20), Qt.AlignRight | Qt.AlignVCenter, time_str)
+
+                    bar_y = ry + min(row_h - 12.0, 29.0)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(surface2)
+                    painter.drawRoundedRect(QRectF(tx, bar_y, tw, 7), 3.5, 3.5)
+                    fill_w = max(5.0, tw * ((g.get("seconds") or 0) / max_vn_secs))
+                    painter.setBrush(col_bar)
+                    painter.drawRoundedRect(QRectF(tx, bar_y, fill_w, 7), 3.5, 3.5)
+                    ry += row_h
+            painter.restore()
+
+    def render_share_image(self, opts=None):
+        """Render a clean full-resolution PNG of the share canvas (no editor chrome)."""
+        from PySide6.QtGui import QImage
+        opt = self._normalize_share_opts(opts)
+        img = QImage(int(opt["canvas_w"]), int(opt["canvas_h"]), QImage.Format_ARGB32)
+        painter = QPainter(img)
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        self.draw_share_canvas(painter, opt)
+        painter.end()
+        return img
+
+    def open_share_dialog(self):
+        dlg = StatsShareDialog(self)
+        dlg.exec()
+
     # ---------- sessions ----------
     def open_sessions(self):
         start, end = self._range()
         dialog = SessionsDialog(self, start.isoformat(), end.isoformat())
         dialog.exec()
         self.refresh()
+
+
+class ShareCanvasEditor(QWidget):
+    """Interactive WYSIWYG canvas: drag blocks directly, resize handles, snap guides."""
+
+    changed = Signal()
+    selection_changed = Signal(str)
+
+    LABELS = {
+        "header": "Title & date range",
+        "metrics": "Summary cards",
+        "chart": "Activity chart",
+        "list": "Most read visual novels",
+    }
+    ORDER = ("header", "metrics", "chart", "list")
+
+    def __init__(self, stats_page, opts):
+        super().__init__()
+        self.stats_page = stats_page
+        self.opts = opts
+        self.selected_key = "metrics"
+        self._hover_key = ""
+        self._mode = None        # "move" | "resize_br" | "resize_r" | "resize_b"
+        self._drag_origin = None
+        self._orig_rect = None
+        self._guides = []        # list of ("v"|"h", coord)
+        self._undo_stack = []
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumSize(560, 420)
+
+    def _canvas_transform(self):
+        cw, ch = float(self.opts["canvas_w"]), float(self.opts["canvas_h"])
+        pad = 20.0
+        aw = max(100.0, self.width() - pad * 2)
+        ah = max(100.0, self.height() - pad * 2)
+        scale = min(aw / cw, ah / ch, 1.0)
+        ox = (self.width() - cw * scale) / 2.0
+        oy = (self.height() - ch * scale) / 2.0
+        return scale, ox, oy
+
+    def _to_canvas(self, pos):
+        scale, ox, oy = self._canvas_transform()
+        return (pos.x() - ox) / scale, (pos.y() - oy) / scale
+
+    def _hit_test(self, cx, cy):
+        blocks = self.opts.get("blocks") or {}
+        check_order = [self.selected_key] + [k for k in reversed(self.ORDER) if k != self.selected_key]
+        for key in check_order:
+            b = blocks.get(key)
+            if not b or not b.get("visible", True):
+                continue
+            x, y, w, h = b["x"], b["y"], b["w"], b["h"]
+            if key == self.selected_key:
+                if abs(cx - (x + w)) <= 12 and abs(cy - (y + h)) <= 12:
+                    return key, "resize_br"
+                if abs(cx - (x + w)) <= 9 and (y + 8) <= cy <= (y + h - 8):
+                    return key, "resize_r"
+                if abs(cy - (y + h)) <= 9 and (x + 8) <= cx <= (x + w - 8):
+                    return key, "resize_b"
+            if x <= cx <= x + w and y <= cy <= y + h:
+                return key, "move"
+        return "", None
+
+    def _push_undo(self):
+        import copy
+        self._undo_stack.append(copy.deepcopy(self.opts["blocks"]))
+        if len(self._undo_stack) > 30:
+            self._undo_stack.pop(0)
+
+    def undo(self):
+        if not self._undo_stack:
+            return False
+        self.opts["blocks"] = self._undo_stack.pop()
+        self.update()
+        self.changed.emit()
+        return True
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        self.setFocus()
+        cx, cy = self._to_canvas(event.position())
+        key, mode = self._hit_test(cx, cy)
+        if key != self.selected_key:
+            self.selected_key = key
+            self.selection_changed.emit(key)
+        if key and mode:
+            self._push_undo()
+            self._mode = mode
+            self._drag_origin = (cx, cy)
+            b = self.opts["blocks"][key]
+            self._orig_rect = (b["x"], b["y"], b["w"], b["h"])
+            if mode == "move":
+                self.setCursor(Qt.ClosedHandCursor)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        cx, cy = self._to_canvas(event.position())
+        if not self._mode or not self.selected_key:
+            key, mode = self._hit_test(cx, cy)
+            self._hover_key = key
+            if mode == "resize_br":
+                self.setCursor(Qt.SizeFDiagCursor)
+            elif mode == "resize_r":
+                self.setCursor(Qt.SizeHorCursor)
+            elif mode == "resize_b":
+                self.setCursor(Qt.SizeVerCursor)
+            elif mode == "move":
+                self.setCursor(Qt.OpenHandCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+            self.update()
+            return
+
+        dx = cx - self._drag_origin[0]
+        dy = cy - self._drag_origin[1]
+        ox, oy, ow, oh = self._orig_rect
+        cw, ch = int(self.opts["canvas_w"]), int(self.opts["canvas_h"])
+        snap = bool(self.opts.get("snap", True))
+        b = self.opts["blocks"][self.selected_key]
+        self._guides = []
+
+        if self._mode == "move":
+            nx = ox + dx
+            ny = oy + dy
+            if snap:
+                nx = round(nx / 8.0) * 8
+                ny = round(ny / 8.0) * 8
+            v_targets = [cw / 2.0, 28.0, cw - 28.0]
+            h_targets = [ch / 2.0, 24.0, ch - 24.0]
+            for ok, ob in self.opts["blocks"].items():
+                if ok == self.selected_key or not ob.get("visible", True):
+                    continue
+                v_targets.extend([ob["x"], ob["x"] + ob["w"], ob["x"] + ob["w"] / 2.0])
+                h_targets.extend([ob["y"], ob["y"] + ob["h"], ob["y"] + ob["h"] / 2.0])
+            for edge_off in (0.0, ow / 2.0, float(ow)):
+                for tgt in v_targets:
+                    if abs((nx + edge_off) - tgt) <= 6.0:
+                        nx = tgt - edge_off
+                        self._guides.append(("v", tgt))
+                        break
+                else:
+                    continue
+                break
+            for edge_off in (0.0, oh / 2.0, float(oh)):
+                for tgt in h_targets:
+                    if abs((ny + edge_off) - tgt) <= 6.0:
+                        ny = tgt - edge_off
+                        self._guides.append(("h", tgt))
+                        break
+                else:
+                    continue
+                break
+            b["x"] = int(max(8, min(cw - ow - 8, round(nx))))
+            b["y"] = int(max(8, min(ch - oh - 8, round(ny))))
+        else:
+            nw, nh = ow, oh
+            if self._mode in ("resize_br", "resize_r"):
+                nw = ow + dx
+                if snap:
+                    nw = round(nw / 8.0) * 8
+            if self._mode in ("resize_br", "resize_b"):
+                nh = oh + dy
+                if snap:
+                    nh = round(nh / 8.0) * 8
+            min_w = 180 if self.selected_key != "list" else 240
+            min_h = 52 if self.selected_key == "header" else (72 if self.selected_key == "metrics" else 110)
+            b["w"] = int(max(min_w, min(cw - ox - 8, round(nw))))
+            b["h"] = int(max(min_h, min(ch - oy - 8, round(nh))))
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._mode:
+            self._mode = None
+            self._guides = []
+            self.setCursor(Qt.OpenHandCursor if self._hover_key else Qt.ArrowCursor)
+            self.update()
+            self.changed.emit()
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_Z:
+            self.undo()
+            return
+        if not self.selected_key:
+            super().keyPressEvent(event)
+            return
+        step = 8 if (event.modifiers() & Qt.ShiftModifier) else 2
+        b = self.opts["blocks"].get(self.selected_key)
+        if not b:
+            return
+        cw, ch = int(self.opts["canvas_w"]), int(self.opts["canvas_h"])
+        moved = False
+        if event.key() == Qt.Key_Left:
+            self._push_undo(); b["x"] = max(8, b["x"] - step); moved = True
+        elif event.key() == Qt.Key_Right:
+            self._push_undo(); b["x"] = min(cw - b["w"] - 8, b["x"] + step); moved = True
+        elif event.key() == Qt.Key_Up:
+            self._push_undo(); b["y"] = max(8, b["y"] - step); moved = True
+        elif event.key() == Qt.Key_Down:
+            self._push_undo(); b["y"] = min(ch - b["h"] - 8, b["y"] + step); moved = True
+        if moved:
+            self.update()
+            self.changed.emit()
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, _event):
+        from PySide6.QtGui import QFont, QPen
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        bg_ws = QColor(self.stats_page.window.palette["surface2"])
+        painter.fillRect(self.rect(), bg_ws)
+
+        scale, ox, oy = self._canvas_transform()
+        cw, ch = int(self.opts["canvas_w"]), int(self.opts["canvas_h"])
+        painter.save()
+        painter.translate(ox, oy)
+        painter.scale(scale, scale)
+
+        painter.setPen(QPen(QColor(self.stats_page.window.palette["border"]), 2.0 / max(scale, 0.2)))
+        painter.drawRect(QRectF(-1, -1, cw + 2, ch + 2))
+
+        self.stats_page.draw_share_canvas(painter, self.opts)
+
+        if self._guides:
+            gpen = QPen(QColor("#e879f9"), 1.5 / max(scale, 0.2), Qt.DashLine)
+            painter.setPen(gpen)
+            for kind, coord in self._guides:
+                if kind == "v":
+                    painter.drawLine(QPointF(coord, 0), QPointF(coord, ch))
+                else:
+                    painter.drawLine(QPointF(0, coord), QPointF(cw, coord))
+
+        accent = QColor(self.stats_page.window.palette["accent"])
+        blocks = self.opts.get("blocks") or {}
+        for key in self.ORDER:
+            b = blocks.get(key)
+            if not b or not b.get("visible", True):
+                continue
+            r = QRectF(b["x"], b["y"], b["w"], b["h"])
+            if key == self.selected_key:
+                pen = QPen(accent, 2.2 / max(scale, 0.2))
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(r, 8, 8)
+                tag = "%s  (%d×%d)" % (tr(self.LABELS.get(key, key)), b["w"], b["h"])
+                f_tag = QFont("Segoe UI", max(8, int(9 / max(scale, 0.55))), QFont.DemiBold)
+                painter.setFont(f_tag)
+                tw = painter.fontMetrics().horizontalAdvance(tag) + 14
+                th = 20
+                ty = max(4.0, r.top() - th - 4) if r.top() > th + 6 else r.top() + 4
+                tag_rect = QRectF(r.left() + 4, ty, tw, th)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(accent)
+                painter.drawRoundedRect(tag_rect, 5, 5)
+                painter.setPen(QColor("#ffffff"))
+                painter.drawText(tag_rect, Qt.AlignCenter, tag)
+                hs = 10.0 / max(scale, 0.4)
+                painter.setPen(QPen(QColor("#ffffff"), 1.5 / max(scale, 0.3)))
+                painter.setBrush(accent)
+                painter.drawRoundedRect(QRectF(r.right() - hs * 0.55, r.bottom() - hs * 0.55, hs, hs), 3, 3)
+                painter.drawRoundedRect(QRectF(r.right() - hs * 0.3, r.center().y() - hs * 0.8, hs * 0.6, hs * 1.6), 2, 2)
+                painter.drawRoundedRect(QRectF(r.center().x() - hs * 0.8, r.bottom() - hs * 0.3, hs * 1.6, hs * 0.6), 2, 2)
+            elif key == self._hover_key:
+                hcol = QColor(accent)
+                hcol.setAlpha(150)
+                painter.setPen(QPen(hcol, 1.5 / max(scale, 0.2), Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(r, 8, 8)
+
+        painter.restore()
+        painter.end()
+
+
+class StatsShareDialog(QDialog):
+    """Canva-style interactive canvas editor for Statistics share images and CSV export."""
+
+    def __init__(self, stats_page):
+        super().__init__(stats_page.window)
+        self.stats_page = stats_page
+        self.setWindowTitle(tr("Share Statistics"))
+        self.setMinimumWidth(940)
+        screen = QApplication.primaryScreen()
+        max_h = (screen.availableGeometry().height() - 60) if screen else 800
+        self.resize(1080, min(780, max_h))
+
+        self.opts = stats_page._normalize_share_opts()
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+
+        # Top toolbar: 1-click presets, canvas size, theme, undo
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        top.addWidget(QLabel(tr("Preset:")))
+        for label, key in (
+            ("Stacked", "stacked"),
+            ("2-Column", "two_col"),
+            ("Wide Banner", "banner"),
+        ):
+            btn = QPushButton(tr(label))
+            btn.clicked.connect(lambda _=False, p=key: self._apply_preset(p))
+            top.addWidget(btn)
+
+        top.addSpacing(8)
+        top.addWidget(QLabel(tr("Canvas:")))
+        self.size_box = NoWheelCombo()
+        for label, dims in (
+            ("Auto (880)", (880, 0)),
+            ("1040 × 620", (1040, 620)),
+            ("1120 × 520", (1120, 520)),
+            ("1200 × 675 (16:9)", (1200, 675)),
+            ("960 × 960 (Square)", (960, 960)),
+        ):
+            self.size_box.addItem(tr(label), dims)
+        self.size_box.currentIndexChanged.connect(self._size_changed)
+        top.addWidget(self.size_box)
+
+        self.theme_box = NoWheelCombo()
+        for label, tval in ((tr("Match app"), "auto"), (tr("Dark"), "dark"), (tr("Light"), "light")):
+            self.theme_box.addItem(label, tval)
+        tidx = self.theme_box.findData(self.opts.get("theme", "auto"))
+        self.theme_box.setCurrentIndex(tidx if tidx >= 0 else 0)
+        self.theme_box.currentIndexChanged.connect(self._on_controls_changed)
+        top.addWidget(self.theme_box)
+
+        self.chk_snap = QCheckBox(tr("Snap"))
+        self.chk_snap.setChecked(bool(self.opts.get("snap", True)))
+        self.chk_snap.toggled.connect(self._on_controls_changed)
+        top.addWidget(self.chk_snap)
+
+        top.addStretch(1)
+        undo_btn = QPushButton(tr("Undo"))
+        undo_btn.setToolTip("Ctrl+Z")
+        undo_btn.clicked.connect(lambda: self.canvas.undo())
+        top.addWidget(undo_btn)
+        fit_btn = QPushButton(tr("Auto-fit height"))
+        fit_btn.clicked.connect(self._auto_fit_height)
+        top.addWidget(fit_btn)
+        outer.addLayout(top)
+
+        # Middle: Interactive canvas + compact right inspector
+        mid = QHBoxLayout()
+        mid.setSpacing(12)
+
+        self.canvas = ShareCanvasEditor(stats_page, self.opts)
+        self.canvas.changed.connect(self._save_opts)
+        mid.addWidget(self.canvas, 1)
+
+        inspector = QFrame()
+        inspector.setObjectName("card")
+        inspector.setFixedWidth(220)
+        il = QVBoxLayout(inspector)
+        il.setContentsMargins(14, 14, 14, 14)
+        il.setSpacing(8)
+
+        tip = QLabel(tr("Drag blocks directly on the canvas. Drag corners or edges to resize."))
+        tip.setObjectName("help")
+        tip.setWordWrap(True)
+        il.addWidget(tip)
+
+        blk_hdr = QLabel(tr("BLOCKS"))
+        blk_hdr.setObjectName("caps")
+        il.addWidget(blk_hdr)
+
+        self._block_checks = {}
+        for key, label in (
+            ("header", "Title & date range"),
+            ("metrics", "Summary cards"),
+            ("chart", "Activity chart"),
+            ("list", "Most read visual novels"),
+        ):
+            cb = QCheckBox(tr(label).replace("&", "&&"))
+            cb.setChecked(bool(self.opts["blocks"][key]["visible"]))
+            cb.toggled.connect(lambda checked, k=key: self._toggle_block(k, checked))
+            il.addWidget(cb)
+            self._block_checks[key] = cb
+
+        il.addSpacing(6)
+        opt_hdr = QLabel(tr("DISPLAY OPTIONS"))
+        opt_hdr.setObjectName("caps")
+        il.addWidget(opt_hdr)
+
+        self.chk_covers = QCheckBox(tr("Show covers"))
+        self.chk_covers.setChecked(bool(self.opts.get("show_covers", True)))
+        self.chk_covers.toggled.connect(self._on_controls_changed)
+        il.addWidget(self.chk_covers)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel(tr("Top VNs")))
+        self.top_n_box = NoWheelCombo()
+        for cnt in (3, 5, 8, 10, 12):
+            self.top_n_box.addItem(tr("Top %d") % cnt, cnt)
+        nidx = self.top_n_box.findData(int(self.opts.get("top_n", 8)))
+        self.top_n_box.setCurrentIndex(nidx if nidx >= 0 else 2)
+        self.top_n_box.currentIndexChanged.connect(self._on_controls_changed)
+        top_row.addWidget(self.top_n_box, 1)
+        il.addLayout(top_row)
+        il.addStretch(1)
+        mid.addWidget(inspector)
+        outer.addLayout(mid, 1)
+
+        self.feedback = QLabel("")
+        self.feedback.setObjectName("sub")
+        outer.addWidget(self.feedback)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        csv_btn = QPushButton(tr("Export CSV…"))
+        csv_btn.clicked.connect(self.stats_page.export_csv)
+        row.addWidget(csv_btn)
+
+        save_btn = QPushButton(tr("Save image…"))
+        save_btn.clicked.connect(self._save_image)
+        row.addWidget(save_btn)
+
+        copy_btn = QPushButton(tr("Copy image"))
+        copy_btn.setObjectName("primary")
+        copy_btn.clicked.connect(self._copy_image)
+        row.addWidget(copy_btn)
+
+        row.addStretch(1)
+        close_btn = QPushButton(tr("Close"))
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        outer.addLayout(row)
+
+    def _apply_preset(self, preset):
+        self.canvas._push_undo()
+        cw, ch, blocks = self.stats_page._share_preset_layout(preset, top_n=self.opts.get("top_n", 8))
+        self.opts["canvas_w"] = cw
+        self.opts["canvas_h"] = ch
+        self.opts["blocks"] = blocks
+        for k, cb in self._block_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(bool(blocks[k]["visible"]))
+            cb.blockSignals(False)
+        self.canvas.update()
+        self._save_opts()
+
+    def _size_changed(self, *_args):
+        dims = self.size_box.currentData()
+        if not dims:
+            return
+        nw, nh = dims
+        if nh == 0:
+            self._apply_preset("stacked")
+            return
+        self.canvas._push_undo()
+        self.opts["canvas_w"] = nw
+        self.opts["canvas_h"] = nh
+        for b in self.opts["blocks"].values():
+            b["w"] = min(b["w"], nw - 16)
+            b["h"] = min(b["h"], nh - 16)
+            b["x"] = max(8, min(nw - b["w"] - 8, b["x"]))
+            b["y"] = max(8, min(nh - b["h"] - 8, b["y"]))
+        self.canvas.update()
+        self._save_opts()
+
+    def _auto_fit_height(self):
+        vis = [b for b in self.opts["blocks"].values() if b.get("visible", True)]
+        if not vis:
+            return
+        self.canvas._push_undo()
+        bottom = max(b["y"] + b["h"] for b in vis)
+        self.opts["canvas_h"] = max(320, min(1800, int(bottom + 24)))
+        self.canvas.update()
+        self._save_opts()
+
+    def _toggle_block(self, key, checked):
+        self.opts["blocks"][key]["visible"] = bool(checked)
+        self.chk_covers.setEnabled(bool(self.opts["blocks"]["list"]["visible"]))
+        self.top_n_box.setEnabled(bool(self.opts["blocks"]["list"]["visible"]))
+        self.canvas.update()
+        self._save_opts()
+
+    def _on_controls_changed(self, *_args):
+        self.opts["show_covers"] = bool(self.chk_covers.isChecked())
+        self.opts["top_n"] = int(self.top_n_box.currentData() or 8)
+        self.opts["theme"] = str(self.theme_box.currentData() or "auto")
+        self.opts["snap"] = bool(self.chk_snap.isChecked())
+        self.canvas.update()
+        self._save_opts()
+
+    def _save_opts(self):
+        ui_cfg = self.stats_page.window.config.setdefault("ui", {})
+        ui_cfg["share_options"] = self.opts
+        try:
+            store.save_config(self.stats_page.window.config)
+        except Exception:
+            pass
+
+    def _copy_image(self):
+        from PySide6.QtGui import QGuiApplication
+        img = self.stats_page.render_share_image(self.opts)
+        QGuiApplication.clipboard().setImage(img)
+        self.feedback.setText(tr("Copied image to clipboard."))
+
+    def _save_image(self):
+        from PySide6.QtWidgets import QFileDialog
+        img = self.stats_page.render_share_image(self.opts)
+        _start, end = self.stats_page._range()
+        default = str(Path(store.APP_DIR) / f"hygger-stats-{end.isoformat()}.png")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Save image"), default, "PNG (*.png)")
+        if path:
+            if img.save(path, "PNG"):
+                self.feedback.setText(tr("Saved image to %s") % path)
+            else:
+                QMessageBox.warning(self, tr("Save image"), tr("Could not save the image."))
 
 
 # ===================================================================== screenshots
@@ -3539,12 +4836,9 @@ class ScreenshotSettingsMixin:
         clear.clicked.connect(self._clear_hotkey)
         line.addWidget(clear)
         layout.addLayout(line)
-        self._help(layout, tr("Set opens a small window: press the combination "
-                              "there and it is shown as you type it. The hotkey "
-                              "only fires while a game is on screen."))
-        self._help(layout, tr("When Magpie upscales the game, the upscaled picture "
-                              "is captured instead of the game's own window, so "
-                              "the screenshot always shows the full game."))
+        self._help(layout, tr("Click Set\u2026 and press your desired key combination. "
+                              "The hotkey only captures while the detected game is in focus, so it will not interfere elsewhere."))
+        self._help(layout, tr("If Magpie is upscaling the game, the upscaled window is captured automatically."))
 
         layout.addSpacing(12)
         layout.addWidget(QLabel(tr("Sound")))
@@ -3578,6 +4872,12 @@ class ScreenshotSettingsMixin:
         self.shot_copy.toggled.connect(self._copy_changed)
         layout.addWidget(self.shot_copy)
         self._help(layout, tr("Paste straight into Discord or an image editor."))
+
+        self.shot_hide_cursor = QCheckBox(tr("Hide cursor when taking screenshots"))
+        self.shot_hide_cursor.setChecked(bool(opts.get("hide_cursor", False)))
+        self.shot_hide_cursor.toggled.connect(self._hide_cursor_changed)
+        layout.addWidget(self.shot_hide_cursor)
+        self._help(layout, tr("Parks the pointer at the edge for ~35 ms during capture so software and Magpie cursors stay out of the frame."))
         layout.addStretch(1)
         return page
 
@@ -3590,6 +4890,11 @@ class ScreenshotSettingsMixin:
         opts = self.window.config.setdefault("screenshot", {})
         opts["copy_clipboard"] = bool(enabled)
         store.update_config_section("screenshot", {"copy_clipboard": bool(enabled)})
+
+    def _hide_cursor_changed(self, enabled):
+        opts = self.window.config.setdefault("screenshot", {})
+        opts["hide_cursor"] = bool(enabled)
+        store.update_config_section("screenshot", {"hide_cursor": bool(enabled)})
 
     def _pick_sound(self):
         from PySide6.QtWidgets import QFileDialog
@@ -3627,19 +4932,66 @@ def default_pictures():
 # changed by "Change cover", so fetching never replaces a chosen image
 VNDB_FIELDS = ("title", "original", "romanized", "developer", "year",
                "rating_average", "rating_weighted")
+RATING_FIELDS = (
+    "vndb_rank", "vndb_popularity", "vndb_votes",
+    "bangumi_id", "bangumi_rating", "bangumi_rank", "bangumi_votes",
+    "egs_id", "egs_median", "egs_average", "egs_rank", "egs_votes",
+    "vndb_vote", "vndb_started", "vndb_finished", "vndb_notes",
+    "length_minutes", "length_votes",
+)
 
 
 def merge_vndb(game, info):
-    """Copy the fields VNDB knows into a game dict; True when something changed."""
+    """Copy fetched metadata and platform ratings into a game dict."""
     changed = False
     for key in VNDB_FIELDS:
         value = (info or {}).get(key)
         if value in (None, ""):
             continue
+        if value == "N/A" and game.get(key) not in (None, "", "N/A"):
+            continue
         if str(game.get(key) or "") != str(value):
             game[key] = value
             changed = True
+    for key in RATING_FIELDS:
+        value = (info or {}).get(key)
+        if value in (None, ""):
+            continue
+        if value == "N/A" and game.get(key) not in (None, "", "N/A"):
+            continue
+        if str(game.get(key) or "") != str(value):
+            game[key] = str(value)
+            changed = True
+    labels = (info or {}).get("vndb_labels")
+    if isinstance(labels, list) and game.get("vndb_labels") != labels:
+        game["vndb_labels"] = list(labels)
+        changed = True
     return changed
+
+
+def format_ratings_summary(game):
+    """Compact one-line summary of VNDB, Bangumi, and ErogameScape ratings."""
+    if not game:
+        return ""
+    parts = []
+    vn_score = game.get("rating_weighted") or game.get("rating_average") or "N/A"
+    vn_rank = game.get("vndb_rank") or "N/A"
+    if vn_score != "N/A" or vn_rank != "N/A":
+        parts.append("VNDB %s (%s)" % (vn_score, vn_rank) if vn_rank != "N/A"
+                     else "VNDB %s" % vn_score)
+    bgm_score = game.get("bangumi_rating") or "N/A"
+    bgm_rank = game.get("bangumi_rank") or "N/A"
+    if bgm_score != "N/A" or bgm_rank != "N/A":
+        parts.append("Bangumi %s (%s)" % (bgm_score, bgm_rank) if bgm_rank != "N/A"
+                     else "Bangumi %s" % bgm_score)
+    egs_med = game.get("egs_median") or "N/A"
+    egs_rank = game.get("egs_rank") or "N/A"
+    if egs_med != "N/A" or egs_rank != "N/A":
+        parts.append("EGS %s (%s)" % (egs_med, egs_rank) if egs_rank != "N/A"
+                     else "EGS %s" % egs_med)
+    elif game.get("bangumi_rating") or game.get("rating_average"):
+        parts.append("EGS N/A")
+    return "  ·  ".join(parts)
 
 
 def stats_key(game):
@@ -3672,6 +5024,18 @@ class FetchSignals(QObject):
     """Carries one finished VNDB fetch back to the GUI thread."""
 
     done = Signal(object, object)           # game, info
+
+
+class VndbSyncSignals(QObject):
+    """Carries VNDB user-list sync results back to the GUI thread."""
+
+    done = Signal(object, object, str)      # entries, auth_info, error
+
+
+class VndbSearchSignals(QObject):
+    """Carries VNDB search results back to the GUI thread."""
+
+    done = Signal(int, object)              # request_id, results
 
 
 class ScreenshotPage(Page):
@@ -4479,7 +5843,7 @@ class ScreenshotMixin:
         opts = (self.config.get("screenshot") or {})
         import time as _t
         _started = _t.time()
-        pixmap = shots.capture_window()
+        pixmap = shots.capture_window(hide_cursor=bool(opts.get("hide_cursor", False)))
         if pixmap is None:
             self._capturing = False
         else:
@@ -4710,6 +6074,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         outer.addWidget(self.tabs, 1)
         self._build_general()
         self._build_presence()
+        self._build_vndb()
         self._build_launchers()
         self._build_updates()
 
@@ -4743,8 +6108,17 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         ("{status}", "{status} – Reading / Paused / Idle"),
         ("{session_time}", "{session_time} – this session, formatted"),
         ("{total_time}", "{total_time} – all playtime, formatted"),
-        ("{rating_average}", "{rating_average} – VNDB average rating"),
-        ("{rating_weighted}", "{rating_weighted} – VNDB weighted rating"),
+        ("{rating_average}", "{rating_average} – VNDB raw average rating"),
+        ("{rating_weighted}", "{rating_weighted} – VNDB Bayesian rating"),
+        ("{vndb_rank}", "{vndb_rank} – VNDB rating rank (e.g. #4)"),
+        ("{vndb_popularity}", "{vndb_popularity} – VNDB popularity rank"),
+        ("{bangumi_rating}", "{bangumi_rating} – Bangumi score"),
+        ("{bangumi_rank}", "{bangumi_rank} – Bangumi rank"),
+        ("{egs_median}", "{egs_median} – ErogameScape median score"),
+        ("{egs_average}", "{egs_average} – ErogameScape average score"),
+        ("{egs_rank}", "{egs_rank} – ErogameScape rank"),
+        ("{vndb_user_vote}", "{vndb_user_vote} – your personal VNDB vote"),
+        ("{vndb_label}", "{vndb_label} – your VNDB list status"),
         ("{vndb}", "{vndb} – VNDB id (used in the button URL)"),
     )
 
@@ -4845,45 +6219,42 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         page, layout = self._page()
         config = self.window.config
 
-        layout.addWidget(QLabel("Discord Application ID"))
+        layout.addWidget(QLabel(tr("Discord Application ID")))
         row = QHBoxLayout()
         self.client_id = QLineEdit(config.get("client_id", ""))
+        self.client_id.setPlaceholderText(tr("Optional — required only for Discord Rich Presence"))
         row.addWidget(self.client_id, 1)
         how = QPushButton(tr("How to get ID?"))
         how.clicked.connect(self._how_to_get_id)
         row.addWidget(how)
         layout.addLayout(row)
-        self._help(layout, "Create an application at discord.com/developers/applications, "
-                           "copy its Application ID and paste it above.")
+        self._help(layout, tr("Paste your Discord Application ID to display your game status on Discord. "
+                              "Playtime tracking and statistics still work if left blank."))
 
         layout.addSpacing(10)
-        self.close_tray = QCheckBox("Close button hides to the tray instead of quitting")
+        self.close_tray = QCheckBox(tr("Minimize to system tray when closing the window"))
         self.close_tray.setChecked(bool(config.get("close_to_tray", True)))
         layout.addWidget(self.close_tray)
 
-        self.start_windows = QCheckBox("Start with Windows (minimised to the tray)")
+        self.start_windows = QCheckBox(tr("Launch automatically with Windows (minimized to tray)"))
         self.start_windows.setChecked(store.startup_enabled())
         layout.addWidget(self.start_windows)
         self.startup_label = self._help(
-            layout, "Creates a shortcut in your Startup folder, so the shortcut "
-                    "never piles up: there is only ever one.")
+            layout, tr("Adds a single shortcut to your Windows Startup folder."))
         self.startup_label.setText(tr("Reading the startup shortcut\u2026"))
 
         self.debug_box = QCheckBox(tr("Debug mode \u2013 write presence_debug.log"))
         self.debug_box.setChecked(bool(config.get("debug_log", False)))
         layout.addWidget(self.debug_box)
-        self._help(layout, "Debug mode records which window was in front, which "
-                           "processes were matched and why a status was chosen. "
-                           "Off by default; no data leaves your PC.")
+        self._help(layout, tr("Logs window focus and process-matching details to presence_debug.log "
+                              "for troubleshooting. Everything stays local on your PC."))
 
         self.auto_fetch_box = QCheckBox(
-            tr("Refresh VNDB data when a game starts"))
+            tr("Refresh metadata & ratings when a game starts").replace("&", "&&"))
         self.auto_fetch_box.setChecked(bool(config.get("auto_fetch_vndb", False)))
         layout.addWidget(self.auto_fetch_box)
-        self._help(layout, "Fetches the game's title, developer, year and "
-                           "rating from VNDB once each time it starts. "
-                           "Needs a network connection; a failed fetch is "
-                           "ignored.")
+        self._help(layout, tr("Automatically updates title, developer, release year, and platform "
+                              "ratings once per launch. Requires an internet connection; failures are ignored."))
 
         layout.addSpacing(14)
         layout.addWidget(QLabel(tr("Language")))
@@ -4902,7 +6273,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         language_row.addWidget(reload_strings)
         language_row.addStretch(1)
         layout.addLayout(language_row)
-        self._help(layout, "Takes effect the next time the app starts.")
+        self._help(layout, tr("Switches the interface language immediately — no restart needed."))
 
         layout.addSpacing(14)
         layout.addWidget(QLabel(tr("Library title")))
@@ -4927,9 +6298,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         romanised = (config.get("library_title_mode") or "original") == "romanized"
         (self.title_romanised if romanised else self.title_original).setChecked(True)
         self.title_group.buttonClicked.connect(self._title_mode_changed)
-        self._help(layout, "Which name the Library shows. Click the one you want - the "
-                           "old drop-down also changed itself when the mouse wheel "
-                           "scrolled over it.")
+        self._help(layout, tr("Choose whether the Library displays original titles (e.g. Japanese) or romanized titles."))
 
         layout.addSpacing(14)
         layout.addWidget(QLabel(tr("Idle after")))
@@ -4944,22 +6313,22 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         idle_row.addWidget(self.idle_seconds)
         idle_row.addStretch(1)
         layout.addLayout(idle_row)
-        self._help(layout, "The card switches to Idle after this long without "
-                           "keyboard or mouse input (10 s up to 4 h). That time is "
-                           "left out of the session, the total and the statistics.")
+        self._help(layout, tr("Marks your status as Idle after this many seconds without keyboard or "
+                              "mouse input (10 s to 4 h). Idle time is excluded from your session, "
+                              "total playtime, and statistics."))
 
 
         layout.addSpacing(14)
         layout.addSpacing(14)
-        layout.addWidget(QLabel("Data files"))
+        layout.addWidget(QLabel(tr("Data files")))
         summary = store.data_summary()
         self.data_label = QLabel("")
         self.data_label.setObjectName("help")
         layout.addWidget(self.data_label)
         self._refresh_data_label()
-        self._help(layout, tr("games.json, config.json and stats.db live in "
-                              "%APPDATA%\\HyggerPresence. Put your old files there "
-                              "and press Reload."))
+        self._help(layout, tr("Your library, settings, and playtime history (games.json, config.json, "
+                              "stats.db) live in %APPDATA%\\HyggerPresence. To restore a backup, copy "
+                              "your files there and click Reload data."))
         data_row = QHBoxLayout()
         reload_button = QPushButton("Reload data")
         reload_button.clicked.connect(self._reload_data)
@@ -5015,15 +6384,15 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
 
     def _retranslate_tabs(self):
         for tabs, captions in ((getattr(self, "tabs", None),
-                                ("General", "Presence", "Launchers", "Updates",
-                                 "Screenshots")),
+                                ("General", "Presence", "VNDB & Ratings",
+                                 "Launchers", "Updates", "Screenshots")),
                                (getattr(self, "presence_tabs", None),
-                                ("Reading", "Paused", "Idle", "Advanced"))):
+                                ("Reading", "Paused", "Idle", "Advanced", "Variables"))):
             if tabs is None:
                 continue
             for index, caption in enumerate(captions):
                 if index < tabs.count():
-                    tabs.setTabText(index, tr(caption))
+                    tabs.setTabText(index, tr(caption).replace("&", "&&"))
         try:
             self._refresh_data_label()
         except Exception:
@@ -5078,6 +6447,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if getattr(self, "_vars_dirty", False):
+            self._vars_dirty = False
+            self.refresh_variables()
         if not getattr(self, "_startup_label_loaded", False):
             self._startup_label_loaded = True
             # one PowerShell call, only the first time the page is opened
@@ -5113,9 +6485,188 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         QMessageBox.information(
             self, tr("How to get ID?"),
             tr("1. Open https://discord.com/developers/applications\n"
-               "2. Click \u201cNew Application\u201d, give it a name and create it\n"
-               "3. Open \u201cGeneral Information\u201d and copy the Application ID\n"
-               "4. Paste it above and press Save"))
+               "2. Click \u201cNew Application\u201d, enter a name (e.g. Hygger Presence), and create it\n"
+               "3. Under \u201cGeneral Information\u201d, copy the Application ID\n"
+               "4. Paste it here and click Save"))
+
+    def _how_to_get_vndb_token(self):
+        QMessageBox.information(
+            self, tr("How to get a VNDB API token?"),
+            tr("1. Log in to https://vndb.org and open your profile \u2192 Applications (https://vndb.org/u/tokens)\n"
+               "2. Click \u201cCreate new token\u201d and give it a label\n"
+               "3. Tick \u201clistread\u201d (to sync your VNDB library) and optionally \u201clistwrite\u201d "
+               "(to auto-mark games as Playing)\n"
+               "4. Copy the token, paste it above, and click Verify"))
+
+    # ------------------------------------------------------------ VNDB & Ratings
+    def _build_vndb(self):
+        page, layout = self._page()
+        config = self.window.config
+        vcfg = config.get("vndb") or {}
+        rcfg = config.get("ratings") or {}
+
+        layout.addWidget(QLabel(tr("VNDB API token (optional)")))
+        token_row = QHBoxLayout()
+        self.vndb_token_edit = QLineEdit(vcfg.get("api_token") or "")
+        self.vndb_token_edit.setEchoMode(QLineEdit.Password)
+        self.vndb_token_edit.setPlaceholderText(tr("Optional — paste your personal VNDB token"))
+        token_row.addWidget(self.vndb_token_edit, 1)
+
+        self.vndb_token_show = QPushButton(tr("Show"))
+        self.vndb_token_show.setCheckable(True)
+        self.vndb_token_show.toggled.connect(
+            lambda on: self.vndb_token_edit.setEchoMode(
+                QLineEdit.Normal if on else QLineEdit.Password))
+        token_row.addWidget(self.vndb_token_show)
+
+        self.vndb_verify_btn = QPushButton(tr("Verify"))
+        self.vndb_verify_btn.clicked.connect(self._verify_vndb_token)
+        token_row.addWidget(self.vndb_verify_btn)
+
+        how_token = QPushButton(tr("How to get token?"))
+        how_token.clicked.connect(self._how_to_get_vndb_token)
+        token_row.addWidget(how_token)
+        layout.addLayout(token_row)
+
+        self.vndb_token_status = QLabel("")
+        self.vndb_token_status.setObjectName("help")
+        self.vndb_token_status.setWordWrap(True)
+        self._refresh_token_status(vcfg)
+        layout.addWidget(self.vndb_token_status)
+        self._help(layout, tr("Your token is stored locally in config.json and only sent to api.vndb.org. "
+                              "Every feature below is optional and can be toggled on or off independently."))
+
+        layout.addSpacing(12)
+        layout.addWidget(QLabel(tr("VNDB features (optional)")))
+        self.vndb_search_box = QCheckBox(tr("Enable VNDB title search when adding or editing games"))
+        self.vndb_search_box.setChecked(bool(vcfg.get("enable_search", True)))
+        layout.addWidget(self.vndb_search_box)
+        self._help(layout, tr("Search VNDB by game name right inside Add Game and Edit Game instead of "
+                              "pasting a URL or ID manually."))
+
+        self.vndb_sync_box = QCheckBox(tr("Enable VNDB library sync (show every game from your VNDB list)"))
+        self.vndb_sync_box.setChecked(bool(vcfg.get("enable_list_sync", False)))
+        self.vndb_sync_box.toggled.connect(self._sync_vndb_fields)
+        layout.addWidget(self.vndb_sync_box)
+        self._help(layout, tr("Requires a token with listread permission. Games on your VNDB list without "
+                              "a local .exe appear as unlinked entries until you attach an executable."))
+
+        label_row = QHBoxLayout()
+        label_row.addSpacing(22)
+        label_row.addWidget(QLabel(tr("Sync labels:")))
+        self._sync_label_checks = {}
+        saved_labels = {int(x) for x in (vcfg.get("sync_labels") or []) if str(x).isdigit()}
+        for lid, lname in ((1, "Playing"), (2, "Finished"), (3, "Stalled"),
+                           (4, "Dropped"), (5, "Wishlist")):
+            cb = QCheckBox(tr(lname))
+            cb.setChecked(lid in saved_labels)
+            label_row.addWidget(cb)
+            self._sync_label_checks[lid] = cb
+        label_row.addStretch(1)
+        layout.addLayout(label_row)
+        self._help(layout, tr("Leave all unchecked to sync every game on your VNDB list."))
+
+        sync_opts_row = QHBoxLayout()
+        sync_opts_row.addSpacing(22)
+        self.vndb_auto_sync_box = QCheckBox(tr("Auto-sync VNDB list when the app starts"))
+        self.vndb_auto_sync_box.setChecked(bool(vcfg.get("auto_sync_on_start", False)))
+        sync_opts_row.addWidget(self.vndb_auto_sync_box)
+        self.vndb_sync_now_btn = QPushButton(tr("Sync now"))
+        self.vndb_sync_now_btn.clicked.connect(self._sync_vndb_from_settings)
+        sync_opts_row.addWidget(self.vndb_sync_now_btn)
+        sync_opts_row.addStretch(1)
+        layout.addLayout(sync_opts_row)
+
+        layout.addSpacing(6)
+        self.vndb_mark_playing_box = QCheckBox(
+            tr("Automatically mark a game as \u201cPlaying\u201d on VNDB when launched"))
+        self.vndb_mark_playing_box.setChecked(bool(vcfg.get("auto_mark_playing", False)))
+        layout.addWidget(self.vndb_mark_playing_box)
+        self._help(layout, tr("Requires a token with listwrite permission. Only updates titles not yet "
+                              "marked Playing or Finished, so replays keep your Finished status."))
+
+        layout.addSpacing(14)
+        layout.addWidget(QLabel(tr("Platform ratings & rankings")))
+        self.rate_vndb_rank_box = QCheckBox(tr("Fetch VNDB rating rank and popularity rank"))
+        self.rate_vndb_rank_box.setChecked(bool(rcfg.get("fetch_vndb_rank", True)))
+        layout.addWidget(self.rate_vndb_rank_box)
+
+        self.rate_bangumi_box = QCheckBox(tr("Fetch Bangumi (bgm.tv) rating and rank"))
+        self.rate_bangumi_box.setChecked(bool(rcfg.get("fetch_bangumi", True)))
+        layout.addWidget(self.rate_bangumi_box)
+
+        self.rate_egs_box = QCheckBox(tr("Fetch ErogameScape median, average, and rank"))
+        self.rate_egs_box.setChecked(bool(rcfg.get("fetch_erogamescape", True)))
+        layout.addWidget(self.rate_egs_box)
+        self._help(layout, tr("ErogameScape restricts access in some regions outside Japan. "
+                              "If it is blocked or unreachable from your connection, it displays N/A automatically."))
+
+        layout.addStretch(1)
+        self._sync_vndb_fields()
+        self.tabs.addTab(page, tr("VNDB & Ratings").replace("&", "&&"))
+
+    def _refresh_token_status(self, vcfg):
+        user = (vcfg.get("username") or "").strip()
+        perms = [str(p) for p in (vcfg.get("permissions") or []) if p]
+        token = (vcfg.get("api_token") or "").strip()
+        if user:
+            perm_text = ", ".join(perms) if perms else tr("none")
+            self.vndb_token_status.setText(
+                tr("Linked account: @%s (permissions: %s)") % (user, perm_text))
+        elif token:
+            self.vndb_token_status.setText(tr("Token entered — click Verify to test permissions."))
+        else:
+            self.vndb_token_status.setText(tr("No VNDB token linked (optional)."))
+
+    def _sync_vndb_fields(self, *_args):
+        sync_on = self.vndb_sync_box.isChecked()
+        for cb in self._sync_label_checks.values():
+            cb.setEnabled(sync_on)
+        self.vndb_auto_sync_box.setEnabled(sync_on)
+        self.vndb_sync_now_btn.setEnabled(sync_on)
+
+    def _verify_vndb_token(self):
+        token = self.vndb_token_edit.text().strip()
+        if not token:
+            vcfg = self.window.config.setdefault("vndb", {})
+            vcfg["api_token"] = ""
+            vcfg["username"] = ""
+            vcfg["user_id"] = ""
+            vcfg["permissions"] = []
+            self._refresh_token_status(vcfg)
+            return
+        self.vndb_verify_btn.setEnabled(False)
+        self.vndb_verify_btn.setText(tr("Checking\u2026"))
+        bridge = FetchSignals(self)
+
+        def done(_unused, result):
+            self.vndb_verify_btn.setEnabled(True)
+            self.vndb_verify_btn.setText(tr("Verify"))
+            if result and result.get("ok"):
+                vcfg = self.window.config.setdefault("vndb", {})
+                vcfg["api_token"] = token
+                vcfg["username"] = result.get("username") or ""
+                vcfg["user_id"] = result.get("id") or ""
+                vcfg["permissions"] = list(result.get("permissions") or [])
+                store.save_config(self.window.config)
+                self._refresh_token_status(vcfg)
+            else:
+                err = (result or {}).get("error") or tr("Verification failed.")
+                self.vndb_token_status.setText(err)
+                QMessageBox.warning(self, tr("VNDB"), err)
+
+        bridge.done.connect(done)
+        self._verify_bridge = bridge
+
+        def worker():
+            from .vndb import verify_token
+            bridge.done.emit(None, verify_token(token))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _sync_vndb_from_settings(self):
+        self.save()
+        self.window.library_page.sync_vndb_library(silent=False)
 
     # ------------------------------------------------------------ Presence
     def _build_presence(self):
@@ -5131,9 +6682,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self.fields[status] = {}
             self.enabled[status] = {}
             for key, caption, help_text in (
-                    ("name", "Title", "The bold first line. {title} works."),
-                    ("details", "Line 1", "Second line, e.g. {developer} | {year}"),
-                    ("state", "Line 2", "Third line, e.g. {status} \u2022 Total {total_time}")):
+                    ("name", "Title", "Top bold line on your Discord card (e.g. {title})."),
+                    ("details", "Line 1", "Second line on the card (e.g. {developer} | {year})."),
+                    ("state", "Line 2", "Third line on the card (e.g. {status} \u2022 Total {total_time}).")):
                 head = QHBoxLayout()
                 head.addWidget(QLabel(caption))
                 head.addStretch(1)
@@ -5177,9 +6728,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addWidget(QLabel("Large image hover text"))
         self.large_text = QLineEdit(opts.get("large_text", "{title}"))
         layout.addWidget(self.large_text)
-        self._help(layout, tr("Shown when the pointer rests on the big image. Every "
-                              "variable works here too, for example {title} or "
-                              "{rating_average}."))
+        self._help(layout, tr("Displayed when hovering over the large image. Supports all "
+                              "variables, such as {title} or {bangumi_rating}."))
 
         layout.addSpacing(8)
         layout.addWidget(QLabel("Small image"))
@@ -5197,9 +6747,8 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addWidget(QLabel("Small image hover text"))
         self.small_text = QLineEdit(opts.get("small_text", ""))
         layout.addWidget(self.small_text)
-        self._help(layout, tr("Both fields are disabled while the small image is None. "
-                              "The hover text takes the same variables; the preview "
-                              "on Detection shows them when you rest the pointer there."))
+        self._help(layout, tr("Disabled while Small image is set to None. "
+                              "Hover text supports all variables and can be previewed on the Detection page."))
 
         layout.addSpacing(8)
         self.show_timer = QCheckBox("Show the elapsed timer while Reading")
@@ -5214,15 +6763,16 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         layout.addWidget(QLabel("Button URL"))
         self.button_url = QLineEdit(opts.get("button_url", "https://vndb.org/{vndb}"))
         layout.addWidget(self.button_url)
-        self._help(layout, "Discord allows one button. {vndb} is replaced with the VN id.")
+        self._help(layout, tr("Shown as a clickable button at the bottom of your Discord card. "
+                              "{vndb} is replaced with the VNDB ID (e.g. v2002)."))
 
         layout.addSpacing(8)
-        layout.addWidget(QLabel("Time formats"))
+        layout.addWidget(QLabel(tr("Time formats")))
         self.session_fmt = QLineEdit(opts.get("session_time_format") or store.TIMEFORMAT)
         self.total_fmt = QLineEdit(opts.get("total_time_format") or store.TIMEFORMAT)
-        layout.addWidget(QLabel("Session time"))
+        layout.addWidget(QLabel(tr("Session time")))
         layout.addWidget(self.session_fmt)
-        layout.addWidget(QLabel("Total time"))
+        layout.addWidget(QLabel(tr("Total time")))
         layout.addWidget(self.total_fmt)
         presets = QHBoxLayout()
         for label, fmt in (("1h 23m 04s", store.TIMEFORMAT),
@@ -5235,18 +6785,18 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             presets.addWidget(chip)
         presets.addStretch(1)
         layout.addLayout(presets)
-        self._help(layout,
-                   "Placeholders: {h} {m} {s} \u2013 no leading zero, {hh} {mm} {ss} \u2013 "
-                   "padded, {h:} {mm}:{ss} \u2013 with colons.\n"
-                   "Conditional blocks: {h?}\u2026{/h} only when hours > 0, "
-                   "{!h}\u2026{/!h} only when hours == 0 (same for m / s).")
+        self._help(layout, tr(
+            "Tokens: {h} {m} {s} (no leading zero), {hh} {mm} {ss} (zero-padded), {h:} {mm}:{ss} (with colons).\n"
+            "Conditionals: {h?}\u2026{/h} renders only if hours > 0; {!h}\u2026{/!h} only if hours == 0 (works for m and s too)."))
 
         layout.addSpacing(8)
-        layout.addWidget(QLabel("Variables available in every line"))
+        layout.addWidget(QLabel(tr("Variables available in every line")))
         self._help(layout,
                    "{title}  {romanized_title}  {developer}  {year}  {status}  "
-                   "{session_time}  {total_time}  {rating_average}  "
-                   "{rating_weighted}  {vndb}")
+                   "{session_time}  {total_time}  {rating_average}  {rating_weighted}  "
+                   "{vndb_rank}  {vndb_popularity}  {bangumi_rating}  {bangumi_rank}  "
+                   "{egs_median}  {egs_average}  {egs_rank}  {vndb_user_vote}  "
+                   "{vndb_label}  {vndb}")
         reset = QPushButton("Reset presence settings to default")
         reset.clicked.connect(self._reset_presence)
         layout.addWidget(reset)
@@ -5312,6 +6862,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
     # ------------------------------------------------------------ Launchers
     def _build_launchers(self):
         page = QWidget()
+        self.launchers_tab = page
         launch_layout = QVBoxLayout(page)
         launch_layout.setContentsMargins(14, 14, 14, 14)
         self.launcher_list = QTableWidget(0, 1)
@@ -5328,9 +6879,9 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self._remember_launcher_columns)
         self.launcher_list.doubleClicked.connect(lambda _i: self._edit_launcher())
         launch_layout.addWidget(self.launcher_list, 1)
-        self._help(launch_layout,
-                   "Launchers appear in the Start \u25be menu. Locale Emulator profiles are "
-                   "read from LEConfig.xml next to LEProc.exe; GalFC can be added once.")
+        self._help(launch_layout, tr(
+            "Configured launchers appear under the Start \u25be menu in the Library. "
+            "Locale Emulator profiles are imported from LEConfig.xml next to LEProc.exe."))
         row_box = QHBoxLayout()
         add_menu = QPushButton("Add\u2026")
         from PySide6.QtWidgets import QMenu
@@ -5731,6 +7282,26 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
         config["idle_seconds"] = int(self.idle_seconds.value())
         config["auto_check"] = bool(self.auto_check.isChecked())
         config["auto_fetch_vndb"] = bool(self.auto_fetch_box.isChecked())
+        vcfg = dict(config.get("vndb") or {})
+        new_token = self.vndb_token_edit.text().strip()
+        if new_token != (vcfg.get("api_token") or "").strip():
+            vcfg["username"] = ""
+            vcfg["user_id"] = ""
+            vcfg["permissions"] = []
+        vcfg["api_token"] = new_token
+        vcfg["enable_search"] = bool(self.vndb_search_box.isChecked())
+        vcfg["enable_list_sync"] = bool(self.vndb_sync_box.isChecked())
+        vcfg["sync_labels"] = [lid for lid, cb in self._sync_label_checks.items()
+                               if cb.isChecked()]
+        vcfg["auto_sync_on_start"] = bool(self.vndb_auto_sync_box.isChecked())
+        vcfg["auto_mark_playing"] = bool(self.vndb_mark_playing_box.isChecked())
+        config["vndb"] = vcfg
+        config["ratings"] = {
+            "fetch_vndb_rank": bool(self.rate_vndb_rank_box.isChecked()),
+            "fetch_bangumi": bool(self.rate_bangumi_box.isChecked()),
+            "fetch_erogamescape": bool(self.rate_egs_box.isChecked()),
+        }
+        self._refresh_token_status(vcfg)
         config["templates"] = {
             status: dict(
                 {key: edit.text() for key, edit in self.fields[status].items()},
@@ -5771,6 +7342,7 @@ class SettingsPage(ScreenshotSettingsMixin, Page):
             self.window.library_page._apply_view(
                 config["ui"].get("library_view", "list"))
             self.window.library_page.refresh_menu()
+            self.window.library_page.update_vndb_controls()
             self.window.library_page.refresh()
         except Exception:
             pass
@@ -6651,9 +8223,8 @@ class RoutesEditor(QWidget):
         self.hint.setText(self._message or ("" if self.rows else self._help()))
 
     def _help(self):
-        return tr("Add the routes you have finished and the time you spent in "
-                  "each. Drag the grip to move a route; the accumulative time "
-                  "follows the read order numbers.")
+        return tr("Click + to track routes and playtime. Drag the left grip to reorder; "
+                  "cumulative totals follow the Order numbers.")
 
     def _say(self, text):
         """Put a message on the action row (it takes the empty-state help's place)."""
@@ -6661,7 +8232,6 @@ class RoutesEditor(QWidget):
         self.hint.setText(text)
 
     # -------------------------------------------------------------- writing
-    @staticmethod
     @staticmethod
     def _sequence(entries):
         """The indexes of the entries in read order.
@@ -7124,189 +8694,1083 @@ class RoutesEditor(QWidget):
 
 
 
+class VndbSearchDialog(QDialog):
+    """Search VNDB by title and pick a visual novel."""
+
+    def __init__(self, window, initial_query=""):
+        super().__init__(window)
+        self.window = window
+        self.selected = None
+        self._req_id = 0
+        self.setWindowTitle(tr("Search VNDB"))
+        self.resize(620, 420)
+        outer = QVBoxLayout(self)
+        outer.setSpacing(8)
+
+        bar = QHBoxLayout()
+        self.query_edit = QLineEdit(initial_query)
+        self.query_edit.setPlaceholderText(tr("Enter game title (English, Japanese, or romaji)…"))
+        self.query_edit.returnPressed.connect(self._run_search)
+        bar.addWidget(self.query_edit, 1)
+        self.search_btn = QPushButton(tr("Search"))
+        self.search_btn.setObjectName("primary")
+        self.search_btn.setAutoDefault(False)
+        self.search_btn.clicked.connect(self._run_search)
+        bar.addWidget(self.search_btn)
+        outer.addLayout(bar)
+
+        self.status_label = QLabel(tr("Type a visual novel title and press Search."))
+        self.status_label.setObjectName("sub")
+        outer.addWidget(self.status_label)
+
+        self.results_list = QListWidget()
+        self.results_list.itemDoubleClicked.connect(lambda _i: self._accept_current())
+        self.results_list.currentRowChanged.connect(
+            lambda row: self.use_btn.setEnabled(row >= 0))
+        outer.addWidget(self.results_list, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton(tr("Cancel"))
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(self.reject)
+        self.use_btn = QPushButton(tr("Use selected"))
+        self.use_btn.setObjectName("primary")
+        self.use_btn.setEnabled(False)
+        self.use_btn.setAutoDefault(False)
+        self.use_btn.clicked.connect(self._accept_current)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.use_btn)
+        outer.addLayout(buttons)
+
+        self._signals = VndbSearchSignals(self)
+        self._signals.done.connect(self._on_results)
+        if initial_query.strip():
+            QTimer.singleShot(0, self._run_search)
+
+    def _run_search(self):
+        query = self.query_edit.text().strip()
+        if not query:
+            return
+        self._req_id += 1
+        rid = self._req_id
+        self.search_btn.setEnabled(False)
+        self.status_label.setText(tr("Searching VNDB…"))
+        self.results_list.clear()
+        self.use_btn.setEnabled(False)
+        app = self.window.app
+        signals = self._signals
+
+        def worker():
+            try:
+                rows = app.search_vndb(query, limit=15)
+            except Exception:
+                rows = []
+            signals.done.emit(rid, rows)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_results(self, rid, rows):
+        if rid != self._req_id:
+            return
+        self.search_btn.setEnabled(True)
+        self.results_list.clear()
+        if not rows:
+            self.status_label.setText(tr("No matching visual novels found."))
+            return
+        self.status_label.setText(tr("%d result(s) — double-click or click Use selected") % len(rows))
+        for info in rows:
+            title = info.get("original") or info.get("title") or info.get("id")
+            rom = info.get("romanized") or ""
+            extra = f" / {rom}" if rom and rom != title else ""
+            text = "[%s] %s%s  (%s · %s)" % (
+                info.get("id", ""), title, extra,
+                info.get("year") or "????", info.get("developer") or "Unknown")
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, info)
+            self.results_list.addItem(item)
+        self.results_list.setCurrentRow(0)
+
+    def _accept_current(self):
+        item = self.results_list.currentItem()
+        if item is None:
+            return
+        self.selected = item.data(Qt.UserRole)
+        self.accept()
+
+
+class VndbListBlock(QFrame):
+    """Inline VNDB list editor card (labels, vote, calendar dates, notes, releases)."""
+
+    RELEASE_STATUSES = (
+        (2, "Obtained"),
+        (1, "Pending"),
+        (3, "On loan"),
+        (0, "Unknown"),
+        (-1, "Remove"),
+    )
+    VOTE_ITEMS = (
+        (None, "Remove vote"),
+        (10.0, "10 (masterpiece)"),
+        (9.0, "9 (excellent)"),
+        (8.0, "8 (very good)"),
+        (7.0, "7 (good)"),
+        (6.0, "6 (decent)"),
+        (5.0, "5 (so-so)"),
+        (4.0, "4 (weak)"),
+        (3.0, "3 (bad)"),
+        (2.0, "2 (awful)"),
+        (1.0, "1 (worst ever)"),
+    )
+
+    def __init__(self, parent, window, game, on_updated=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.window = window
+        self.game = game
+        self.on_updated = on_updated
+        self.vndb_id = ""
+        self._label_checks = {}
+        self._release_rows = []
+        self._release_updates = {}
+        self._load_req_id = 0
+
+        box = QVBoxLayout(self)
+        box.setContentsMargins(18, 14, 18, 14)
+        box.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        hdr = QLabel(tr("VNDB LIST"))
+        hdr.setObjectName("caps")
+        top.addWidget(hdr)
+        self.status_banner = QLabel("")
+        self.status_banner.setObjectName("sub")
+        top.addWidget(self.status_banner, 1)
+        self.reload_btn = QPushButton(tr("Reload"))
+        self.reload_btn.setAutoDefault(False)
+        self.reload_btn.clicked.connect(lambda: self.load_for(self.vndb_id))
+        top.addWidget(self.reload_btn)
+        box.addLayout(top)
+
+        self.inner = QWidget()
+        self.inner.setObjectName("transparentpanel")
+        self.inner.setStyleSheet("QWidget#transparentpanel{background:transparent;}")
+        body = QVBoxLayout(self.inner)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(10)
+
+        # Labels (system + custom, excluding virtual No label / Voted)
+        lbl_row = QHBoxLayout()
+        lbl_row.setSpacing(12)
+        lbl_cap = QLabel(tr("Labels"))
+        lbl_cap.setMinimumWidth(120)
+        lbl_row.addWidget(lbl_cap, 0, Qt.AlignTop)
+        self.labels_host = QWidget()
+        self.labels_host.setObjectName("transparentpanel")
+        self.labels_layout = FlowLayout(self.labels_host, margin=0, spacing=10)
+        lbl_row.addWidget(self.labels_host, 1)
+        body.addLayout(lbl_row)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+
+        def flbl(text):
+            lbl = QLabel(tr(text))
+            lbl.setMinimumWidth(120)
+            return lbl
+
+        # Vote 1..10 without .5 and all items visible without scrolling
+        grid.addWidget(flbl("Vote"), 0, 0)
+        self.vote_box = NoWheelCombo()
+        for val, label in self.VOTE_ITEMS:
+            self.vote_box.addItem(tr(label), val)
+        self.vote_box.setMaxVisibleItems(12)
+        grid.addWidget(self.vote_box, 0, 1)
+
+        # Start / Finish date with clickable CalendarPopup matching Statistics
+        def make_date_row(row_idx, caption):
+            grid.addWidget(flbl(caption), row_idx, 0)
+            rbox = QHBoxLayout()
+            rbox.setSpacing(6)
+            btn = QPushButton(tr("Not set"))
+            btn.setObjectName("date")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setAutoDefault(False)
+            btn.setProperty("iso_date", "")
+            btn.clicked.connect(lambda _c=False, b=btn: self._open_calendar(b))
+            rbox.addWidget(btn, 1)
+            today_btn = QPushButton(tr("Today"))
+            today_btn.setAutoDefault(False)
+            today_btn.clicked.connect(lambda _c=False, b=btn: self._set_date_btn(b, self._today_iso()))
+            clr_btn = QPushButton(tr("Clear"))
+            clr_btn.setAutoDefault(False)
+            clr_btn.clicked.connect(lambda _c=False, b=btn: self._set_date_btn(b, ""))
+            rbox.addWidget(today_btn)
+            rbox.addWidget(clr_btn)
+            grid.addLayout(rbox, row_idx, 1)
+            return btn
+
+        self.start_btn = make_date_row(1, "Start date")
+        self.finish_btn = make_date_row(2, "Finish date")
+        body.addLayout(grid)
+
+        # Play time helper (no clipboard copy)
+        from .core import format_time
+        pt_row = QHBoxLayout()
+        pt_row.setSpacing(10)
+        tracked_secs = float(game.get("total_seconds") or 0)
+        avg_mins = int(game.get("length_minutes") or 0)
+        avg_votes = int(game.get("length_votes") or 0)
+        avg_txt = (
+            "%dh %02dm (%d %s)" % (avg_mins // 60, avg_mins % 60, avg_votes, tr("votes"))
+            if avg_mins > 0 else "N/A"
+        )
+        self.playtime_lbl = QLabel(
+            tr("Tracked: %s  \u00b7  VNDB Avg Length: %s") % (format_time(tracked_secs), avg_txt)
+        )
+        self.playtime_lbl.setObjectName("sub")
+        pt_row.addWidget(self.playtime_lbl, 1)
+        self.vote_pt_btn = QPushButton(tr("Vote play time on VNDB \u2197"))
+        self.vote_pt_btn.setAutoDefault(False)
+        self.vote_pt_btn.setToolTip(
+            tr("Opens the VNDB page in your browser so you can submit a play time vote."))
+        self.vote_pt_btn.clicked.connect(self._open_playtime_on_vndb)
+        pt_row.addWidget(self.vote_pt_btn)
+        body.addLayout(pt_row)
+
+        # Notes
+        notes_row = QHBoxLayout()
+        notes_row.setSpacing(12)
+        notes_cap = flbl("Notes")
+        notes_row.addWidget(notes_cap, 0, Qt.AlignTop)
+        from PySide6.QtWidgets import QTextEdit
+        self.notes_edit = QTextEdit()
+        self.notes_edit.setPlaceholderText(tr("Personal notes (synced to your VNDB list, max 2000 characters)…"))
+        self.notes_edit.setFixedHeight(74)
+        notes_row.addWidget(self.notes_edit, 1)
+        body.addLayout(notes_row)
+
+        # Releases
+        rel_row = QHBoxLayout()
+        rel_row.setSpacing(12)
+        rel_cap = flbl("Releases")
+        rel_row.addWidget(rel_cap, 0, Qt.AlignTop)
+        rel_col = QVBoxLayout()
+        rel_col.setSpacing(6)
+        self.rel_list_layout = QVBoxLayout()
+        self.rel_list_layout.setSpacing(5)
+        rel_col.addLayout(self.rel_list_layout)
+        add_rel_row = QHBoxLayout()
+        add_rel_row.setSpacing(8)
+        self.add_rel_combo = NoWheelCombo()
+        self.add_rel_combo.addItem(tr("— add release —"), None)
+        add_rel_row.addWidget(self.add_rel_combo, 1)
+        self.add_rel_status = NoWheelCombo()
+        for code, lbl in ((2, "Obtained"), (1, "Pending"), (3, "On loan"), (0, "Unknown")):
+            self.add_rel_status.addItem(tr(lbl), code)
+        add_rel_row.addWidget(self.add_rel_status)
+        self.add_rel_btn = QPushButton(tr("Add"))
+        self.add_rel_btn.setAutoDefault(False)
+        self.add_rel_btn.clicked.connect(self._add_selected_release)
+        add_rel_row.addWidget(self.add_rel_btn)
+        rel_col.addLayout(add_rel_row)
+        rel_row.addLayout(rel_col, 1)
+        body.addLayout(rel_row)
+
+        # Action buttons inside the VNDB List card
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        self.remove_btn = QPushButton(tr("Remove from VNDB List"))
+        self.remove_btn.setObjectName("danger")
+        self.remove_btn.setAutoDefault(False)
+        self.remove_btn.clicked.connect(self._delete_entry)
+        btns.addWidget(self.remove_btn)
+        btns.addStretch(1)
+        self.save_btn = QPushButton(tr("Save to VNDB"))
+        self.save_btn.setObjectName("primary")
+        self.save_btn.setAutoDefault(False)
+        self.save_btn.clicked.connect(self._save_entry)
+        btns.addWidget(self.save_btn)
+        body.addLayout(btns)
+
+        box.addWidget(self.inner)
+
+        self._load_signals = FetchSignals(self)
+        self._load_signals.done.connect(self._on_loaded)
+        self._save_signals = FetchSignals(self)
+        self._save_signals.done.connect(self._on_saved)
+
+        # Pre-seed local cached values immediately at 0 ms so UI never looks blank
+        self._seed_local()
+
+    def _seed_local(self):
+        self._populate_labels_ui(None, set(self.game.get("vndb_labels") or []))
+        self._set_vote_value(self.game.get("vndb_vote") or "")
+        self._set_date_btn(self.start_btn, self.game.get("vndb_started") or "")
+        self._set_date_btn(self.finish_btn, self.game.get("vndb_finished") or "")
+        self.notes_edit.setPlainText(self.game.get("vndb_notes") or "")
+
+    @staticmethod
+    def _today_iso():
+        from datetime import date
+        return date.today().isoformat()
+
+    @staticmethod
+    def _set_date_btn(btn, iso):
+        clean = str(iso or "").strip()
+        btn.setProperty("iso_date", clean)
+        btn.setText(clean if clean else tr("Not set"))
+
+    def _open_calendar(self, btn):
+        from datetime import date
+        raw = str(btn.property("iso_date") or "").strip()
+        try:
+            parts = [int(p) for p in raw.split("-")[:3]]
+            if len(parts) == 3:
+                cur = QDate(parts[0], parts[1], parts[2])
+            elif len(parts) == 2:
+                cur = QDate(parts[0], parts[1], 1)
+            elif len(parts) == 1 and parts[0] > 1900:
+                cur = QDate(parts[0], 1, 1)
+            else:
+                cur = QDate.currentDate()
+        except Exception:
+            t = date.today()
+            cur = QDate(t.year, t.month, t.day)
+        popup = CalendarPopup(self, cur)
+        popup.picked.connect(lambda d, b=btn: self._set_date_btn(b, d.isoformat()))
+        popup.move(btn.mapToGlobal(btn.rect().bottomLeft()))
+        popup.show()
+
+    def _set_vote_value(self, raw_vote):
+        clean = str(raw_vote or "").strip()
+        if not clean or clean in ("-", "N/A"):
+            self.vote_box.setCurrentIndex(0)
+            return
+        try:
+            rounded = int(round(float(clean)))
+            idx = self.vote_box.findData(float(max(1, min(10, rounded))))
+            self.vote_box.setCurrentIndex(idx if idx >= 0 else 0)
+        except Exception:
+            self.vote_box.setCurrentIndex(0)
+
+    def _open_playtime_on_vndb(self):
+        if not self.vndb_id:
+            return
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl(f"https://vndb.org/{self.vndb_id}"))
+
+    def load_for(self, vndb_id):
+        from .vndb import parse_vndb_id
+        vid = parse_vndb_id(vndb_id or "") or ""
+        self.vndb_id = vid
+        token = self.window.app.vndb_token()
+        if not vid:
+            self.inner.hide()
+            self.reload_btn.hide()
+            self.status_banner.setText(tr("Set a VNDB ID above to manage your VNDB list."))
+            return
+        if not token:
+            self.inner.hide()
+            self.reload_btn.hide()
+            self.status_banner.setText(tr("Add a VNDB API token in Settings to edit your list here."))
+            return
+        self.inner.show()
+        self.reload_btn.show()
+        self.status_banner.setText(tr("Loading VNDB list entry…"))
+        self.save_btn.setEnabled(False)
+        self.remove_btn.setEnabled(False)
+        self._load_req_id += 1
+        req_id = self._load_req_id
+        signals = self._load_signals
+
+        def worker():
+            from .vndb import fetch_user_entry
+            res = fetch_user_entry(vid, token)
+            signals.done.emit(req_id, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _populate_labels_ui(self, labels, active_ids_or_names):
+        from .vndb import _is_assignable_label
+        while self.labels_layout.count():
+            it = self.labels_layout.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._label_checks = {}
+        if not labels:
+            labels = [
+                {"id": 1, "label": "Playing"},
+                {"id": 2, "label": "Finished"},
+                {"id": 3, "label": "Stalled"},
+                {"id": 4, "label": "Dropped"},
+                {"id": 5, "label": "Wishlist"},
+                {"id": 7, "label": "Private"},
+            ]
+        for lb in labels:
+            if not _is_assignable_label(lb):
+                continue
+            lid = int(lb["id"])
+            name = lb.get("label") or str(lid)
+            cb = QCheckBox(tr(name))
+            checked = (lid in active_ids_or_names) or (name in active_ids_or_names)
+            cb.setChecked(checked)
+            self.labels_layout.addWidget(cb)
+            self._label_checks[lid] = (cb, name)
+
+    def _on_loaded(self, req_id, res):
+        if req_id != self._load_req_id:
+            return
+        entry, labels, all_releases, err = res
+        if err:
+            self.status_banner.setText(err)
+            return
+        self.save_btn.setEnabled(True)
+        self.remove_btn.setEnabled(entry is not None)
+        self.status_banner.setText(
+            tr("Synced (%s)") % self.vndb_id
+            if entry is not None else
+            tr("Not on your VNDB list yet — click Save to VNDB to add it."))
+
+        active_ids = {int(lb.get("id")) for lb in (entry or {}).get("labels", []) if lb.get("id") is not None}
+        self._populate_labels_ui(labels, active_ids if entry is not None else set(self.game.get("vndb_labels") or []))
+
+        if entry is not None:
+            v = entry.get("vote")
+            self._set_vote_value(v / 10.0 if v is not None else "")
+            self._set_date_btn(self.start_btn, entry.get("started") or "")
+            self._set_date_btn(self.finish_btn, entry.get("finished") or "")
+            self.notes_edit.setPlainText(entry.get("notes") or "")
+        existing_rels = {r["id"]: r for r in (entry or {}).get("releases", []) if r.get("id")}
+        self._rebuild_releases_ui(existing_rels, all_releases)
+
+    def _rebuild_releases_ui(self, existing_rels, all_releases):
+        while self.rel_list_layout.count():
+            it = self.rel_list_layout.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._release_rows = []
+        self._release_updates = {}
+        for _rid, rel in existing_rels.items():
+            self._append_release_row(rel, int(rel.get("list_status") if rel.get("list_status") is not None else 2))
+        self.add_rel_combo.clear()
+        self.add_rel_combo.addItem(tr("— add release —"), None)
+        for rel in all_releases or []:
+            rid = rel.get("id")
+            if not rid or rid in existing_rels:
+                continue
+            rdate = rel.get("released") or "????"
+            plats = ",".join(rel.get("platforms") or [])
+            langs = ",".join((l.get("lang") or "") for l in (rel.get("languages") or []) if l.get("lang"))
+            title = rel.get("alttitle") or rel.get("title") or rid
+            label = f"{rdate} · {title} [{rid}] ({plats}{' · ' + langs if langs else ''})"
+            self.add_rel_combo.addItem(label, rel)
+
+    def _append_release_row(self, rel, status_code):
+        rid = rel["id"]
+        row_w = QWidget()
+        row_w.setObjectName("transparentpanel")
+        hbox = QHBoxLayout(row_w)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(8)
+        combo = NoWheelCombo()
+        for code, lbl in self.RELEASE_STATUSES:
+            combo.addItem(tr(lbl), code)
+        idx = combo.findData(int(status_code))
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._release_updates[rid] = int(combo.currentData())
+        combo.currentIndexChanged.connect(
+            lambda _i, r=rid, c=combo: self._release_updates.__setitem__(r, int(c.currentData()))
+        )
+        hbox.addWidget(combo)
+        rdate = rel.get("released") or "????"
+        title = rel.get("alttitle") or rel.get("title") or rid
+        lbl = QLabel(f"{rdate}  \u00b7  {title} ({rid})")
+        lbl.setWordWrap(True)
+        hbox.addWidget(lbl, 1)
+        self.rel_list_layout.addWidget(row_w)
+        self._release_rows.append((rid, rel))
+
+    def _add_selected_release(self):
+        rel = self.add_rel_combo.currentData()
+        if not isinstance(rel, dict) or not rel.get("id"):
+            return
+        st = int(self.add_rel_status.currentData())
+        self._append_release_row(rel, st)
+        self.add_rel_combo.removeItem(self.add_rel_combo.currentIndex())
+
+    def _save_entry(self):
+        token = self.window.app.vndb_token()
+        if not token or not self.vndb_id:
+            return
+        label_ids = [lid for lid, (cb, _name) in self._label_checks.items() if cb.isChecked()]
+        label_names = [name for lid, (cb, name) in self._label_checks.items() if cb.isChecked() and lid != 7]
+        vote_val = self.vote_box.currentData()
+        started = str(self.start_btn.property("iso_date") or "").strip() or None
+        finished = str(self.finish_btn.property("iso_date") or "").strip() or None
+        notes = self.notes_edit.toPlainText()
+        rel_updates = dict(self._release_updates)
+
+        self.save_btn.setEnabled(False)
+        self.save_btn.setText(tr("Saving…"))
+        signals = self._save_signals
+        vid = self.vndb_id
+
+        def worker():
+            from .vndb import update_user_entry, update_release_status
+            ok, err = update_user_entry(
+                vid, token, label_ids=label_ids, vote=vote_val,
+                started=started, finished=finished, notes=notes,
+            )
+            if ok:
+                for rid, st in rel_updates.items():
+                    rok, rerr = update_release_status(rid, token, status=st)
+                    if not rok and not err:
+                        err = rerr
+            signals.done.emit("save", (ok, err, label_names, vote_val, started or "", finished or "", notes))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _delete_entry(self):
+        if QMessageBox.question(
+                self, tr("VNDB"),
+                tr("Remove this visual novel (and its releases) from your VNDB list?")) != QMessageBox.Yes:
+            return
+        token = self.window.app.vndb_token()
+        self.remove_btn.setEnabled(False)
+        signals = self._save_signals
+        vid = self.vndb_id
+
+        def worker():
+            from .vndb import delete_user_entry
+            ok, err = delete_user_entry(vid, token)
+            signals.done.emit("delete", (ok, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_saved(self, mode, payload):
+        self.save_btn.setEnabled(True)
+        self.save_btn.setText(tr("Save to VNDB"))
+        if mode == "delete":
+            ok, err = payload
+            if not ok:
+                self.remove_btn.setEnabled(True)
+                QMessageBox.warning(self, tr("VNDB"), err or tr("Could not remove from VNDB list."))
+                return
+            self.game["vndb_labels"] = []
+            self.game["vndb_vote"] = ""
+            self.game["vndb_started"] = ""
+            self.game["vndb_finished"] = ""
+            self.game["vndb_notes"] = ""
+            self.game["vndb_synced"] = False
+            self.status_banner.setText(tr("Removed from VNDB list."))
+            if callable(self.on_updated):
+                self.on_updated()
+            return
+        ok, err, label_names, vote_val, started, finished, notes = payload
+        if not ok:
+            QMessageBox.warning(self, tr("VNDB"), err or tr("Failed to update VNDB list."))
+            return
+        self.game["vndb_labels"] = label_names
+        self.game["vndb_vote"] = str(int(round(vote_val))) if vote_val is not None else ""
+        self.game["vndb_started"] = started
+        self.game["vndb_finished"] = finished
+        self.game["vndb_notes"] = notes
+        self.game["vndb_synced"] = True
+        self.remove_btn.setEnabled(True)
+        self.status_banner.setText(tr("Saved to VNDB list."))
+        store.save_games(self.window.engine.games)
+        if callable(self.on_updated):
+            self.on_updated()
+
+
 class GameEditorDialog(QDialog):
-    """One editor for everything, in five tabs (replaces the five side buttons)."""
+    """Unified single-page Game Details dialog (metadata, ratings, VNDB list, routes)."""
 
     def __init__(self, window, game):
         super().__init__(window)
         self.window = window
         self.game = game
-        self.setWindowTitle("Edit game")
-        self.setMinimumWidth(820)
-        self.resize(900, 630)
+        self._cover_url = ""
+        self.setWindowTitle(tr("Game Details"))
+        self.setPalette(_build_qpalette(window.palette))
+        self.setStyleSheet(f"QDialog{{background:{window.palette['bg']};}}")
+        apply_dark_title(self, window.palette is DARK)
+        self.setMinimumWidth(840)
+        screen = QApplication.primaryScreen()
+        max_h = (screen.availableGeometry().height() - 60) if screen else 860
+        self.resize(960, min(820, max_h))
 
         outer = QVBoxLayout(self)
-        tabs = QTabWidget()
-        outer.addWidget(tabs)
+        outer.setContentsMargins(18, 16, 18, 14)
+        outer.setSpacing(12)
 
-        # 1) title
-        title_page = QWidget()
-        form = QGridLayout(title_page)
-        form.addWidget(QLabel("Title (original)"), 0, 0)
-        self.title_edit = QLineEdit(game.get("original") or game.get("title") or "")
-        form.addWidget(self.title_edit, 0, 1)
-        form.addWidget(QLabel("Romanised title"), 1, 0)
-        self.romanised_edit = QLineEdit(game.get("romanized") or "")
-        form.addWidget(self.romanised_edit, 1, 1)
-        form.setRowStretch(2, 1)
-        tabs.addTab(title_page, "Title")
-
-        # 2) executable
-        exe_page = QWidget()
-        exe_form = QGridLayout(exe_page)
-        exe_form.addWidget(QLabel("Executable"), 0, 0)
-        self.exe_edit = QLineEdit(game.get("exe") or "")
-        exe_form.addWidget(self.exe_edit, 0, 1)
-        browse = QPushButton("Browse\u2026")
-        browse.clicked.connect(self._browse_exe)
-        exe_form.addWidget(browse, 0, 2)
-        exe_form.setRowStretch(1, 1)
-        tabs.addTab(exe_page, "Executable")
-
-        # 3) VNDB
-        vndb_page = QWidget()
-        vndb_form = QGridLayout(vndb_page)
-        vndb_form.addWidget(QLabel("VNDB id / link"), 0, 0)
-        self.vndb_edit = QLineEdit(game.get("vndb_id") or "")
-        vndb_form.addWidget(self.vndb_edit, 0, 1)
-        fetch = QPushButton("Fetch metadata")
-        fetch.clicked.connect(self._fetch_vndb)
-        vndb_form.addWidget(fetch, 0, 2)
-        self.vndb_info = QLabel(self._describe(game))
-        self.vndb_info.setObjectName("sub")
-        self.vndb_info.setWordWrap(True)
-        vndb_form.addWidget(self.vndb_info, 1, 0, 1, 3)
-        cover_row = QHBoxLayout()
-        cover_button = QPushButton("Change cover\u2026")
-        cover_button.setToolTip(tr("Pick one of the VN's VNDB covers"))
-        cover_button.clicked.connect(self._pick_cover)
-        cover_row.addWidget(cover_button)
-        cover_row.addStretch(1)
-        vndb_form.addLayout(cover_row, 2, 0, 1, 3)
-        vndb_form.setRowStretch(3, 1)
-        tabs.addTab(vndb_page, "VNDB")
-
-        # 4) total time
-        time_page = QWidget()
-        time_form = QVBoxLayout(time_page)
-        from .core import format_time
-        time_form.addWidget(QLabel("Total time (e.g. 3h15m, 195m, 3:15:00)"))
-        self.time_edit = QLineEdit(format_time(game.get("total_seconds", 0)))
-        # Remembered so _save() can tell "the user retyped the total" apart from
-        # "they only fixed the title": parse_time_input() only understands whole
-        # seconds, so writing it back unconditionally slices up to 1 s off a
-        # total that stats.db still has to the millisecond - which is exactly the
-        # 1 s "total vs statistics" gap this release is fixing.
-        self._total_text = self.time_edit.text()
-        time_form.addWidget(self.time_edit)
-        time_form.addWidget(QLabel(tr("Current: %s")
-                                   % format_time(game.get("total_seconds", 0))))
-        time_form.addStretch(1)
-        tabs.addTab(time_page, "Total time")
-
-        # 5) process names
-        proc_page = QWidget()
-        proc_form = QVBoxLayout(proc_page)
-        proc_form.addWidget(QLabel(
-            "Extra process names (comma separated).\n"
-            "Only needed when the game runs under a different .exe than the one above;\n"
-            "executables in the game folder are detected automatically."))
-        self.proc_edit = QLineEdit(", ".join(game.get("process_names") or []))
-        proc_form.addWidget(self.proc_edit)
-        proc_form.addStretch(1)
-        tabs.addTab(proc_page, "Process names")
-
-        # 6) routes
-        tabs.addTab(self._build_routes_page(), tr("Routes"))
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        save = QPushButton("Save")
-        save.setObjectName("primary")
-        save.clicked.connect(self._save)
-        buttons.addWidget(cancel)
-        buttons.addWidget(save)
-        outer.addLayout(buttons)
-
-    # ------------------------------------------------------------- routes
-    def _build_routes_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        hint = QLabel(tr("Route times are typed by hand. They are kept with the "
-                         "game and never change the session clock or statistics."))
-        hint.setObjectName("sub")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        # a game can have twenty routes: the list scrolls instead of stretching
-        # the dialog past the bottom of the screen
-        body = QWidget()
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        self.routes_editor = RoutesEditor(body, self.window.engine, self.game)
-        body_layout.addWidget(self.routes_editor)
-        body_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setObjectName("routescroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
-        return page
+        content = QWidget()
+        body = QVBoxLayout(content)
+        body.setContentsMargins(2, 2, 8, 8)
+        body.setSpacing(14)
 
+        def make_card(title_key=None):
+            card = QFrame()
+            card.setObjectName("card")
+            box = QVBoxLayout(card)
+            box.setContentsMargins(18, 14, 18, 14)
+            box.setSpacing(10)
+            if title_key:
+                hdr = QLabel(tr(title_key))
+                hdr.setObjectName("caps")
+                box.addWidget(hdr)
+            return card, box
+
+        def field_label(text):
+            lbl = QLabel(tr(text))
+            lbl.setMinimumWidth(120)
+            return lbl
+
+        # ---------------- Header + 3-Platform Rating Strip ----------------
+        header_card, header_outer = make_card()
+        header_row = QHBoxLayout()
+        header_row.setSpacing(18)
+
+        self.cover_thumb = QLabel("VN")
+        self.cover_thumb.setFixedSize(96, 136)
+        self.cover_thumb.setAlignment(Qt.AlignCenter)
+        self.cover_thumb.setStyleSheet(
+            "background:%s;border:1px solid %s;border-radius:8px;color:%s;font-weight:600;"
+            % (window.palette["surface2"], window.palette["border"], window.palette["subtext"])
+        )
+        header_row.addWidget(self.cover_thumb, 0, Qt.AlignTop)
+
+        summary_col = QVBoxLayout()
+        summary_col.setSpacing(8)
+        title_line = QHBoxLayout()
+        title_line.setSpacing(8)
+        self.header_title = QLabel(game.get("original") or game.get("title") or tr("Untitled"))
+        self.header_title.setObjectName("h2")
+        self.header_title.setWordWrap(True)
+        title_line.addWidget(self.header_title, 1)
+
+        self.source_pill = QLabel("")
+        self.source_pill.setObjectName("pill")
+        title_line.addWidget(self.source_pill, 0, Qt.AlignTop)
+
+        self.start_btn = QPushButton(tr("Start"))
+        self.start_btn.setObjectName("primary")
+        self.start_btn.setAutoDefault(False)
+        self.start_btn.setMenu(self._build_start_menu())
+        title_line.addWidget(self.start_btn, 0, Qt.AlignTop)
+        summary_col.addLayout(title_line)
+
+        self.header_meta = QLabel("")
+        self.header_meta.setObjectName("sub")
+        self.header_meta.setWordWrap(True)
+        summary_col.addWidget(self.header_meta)
+
+        # 3 Prominent Platform Rating Tiles
+        ratings_row = QHBoxLayout()
+        ratings_row.setSpacing(10)
+        self._rate_tiles = {}
+        tile_style = (
+            "QFrame#ratetile{background:%s;border:1px solid %s;border-radius:8px;}"
+            % (window.palette["surface2"], window.palette["border"])
+        )
+        for pkey, ptitle in (
+            ("vndb", tr("VNDB (Weighted / Average)")),
+            ("bangumi", "Bangumi"),
+            ("egs", tr("ErogameScape (Median / Average)")),
+        ):
+            tile = QFrame()
+            tile.setObjectName("ratetile")
+            tile.setStyleSheet(tile_style)
+            tbox = QVBoxLayout(tile)
+            tbox.setContentsMargins(12, 8, 12, 8)
+            tbox.setSpacing(3)
+            cap = QLabel(ptitle)
+            cap.setObjectName("caps")
+            tbox.addWidget(cap)
+            val = QLabel("N/A")
+            val.setObjectName("h2")
+            tbox.addWidget(val)
+            sub = QLabel("")
+            sub.setObjectName("help")
+            sub.setWordWrap(True)
+            tbox.addWidget(sub)
+            ratings_row.addWidget(tile, 1)
+            self._rate_tiles[pkey] = (val, sub)
+        summary_col.addLayout(ratings_row)
+
+        self.vndb_info = QLabel("")
+        self.vndb_info.setObjectName("help")
+        self.vndb_info.setWordWrap(True)
+        summary_col.addWidget(self.vndb_info)
+
+        header_row.addLayout(summary_col, 1)
+        header_outer.addLayout(header_row)
+        body.addWidget(header_card)
+
+        # ---------------- 1. Details & Sources Card ----------------
+        details_card, details_box = make_card("GAME DETAILS")
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(9)
+        form.setColumnStretch(1, 1)
+
+        form.addWidget(field_label("Title (original)"), 0, 0)
+        self.title_edit = QLineEdit(game.get("original") or game.get("title") or "")
+        self.title_edit.textChanged.connect(
+            lambda txt: self.header_title.setText(txt.strip() or tr("Untitled")))
+        form.addWidget(self.title_edit, 0, 1, 1, 2)
+
+        form.addWidget(field_label("Romanised title"), 1, 0)
+        self.romanised_edit = QLineEdit(game.get("romanized") or "")
+        form.addWidget(self.romanised_edit, 1, 1, 1, 2)
+
+        form.addWidget(field_label("Executable"), 2, 0)
+        exe_row = QHBoxLayout()
+        exe_row.setSpacing(8)
+        self.exe_edit = QLineEdit(game.get("exe") or "")
+        self.exe_edit.setPlaceholderText(tr("Path to the game's .exe file"))
+        exe_row.addWidget(self.exe_edit, 1)
+        browse = QPushButton(tr("Browse\u2026"))
+        browse.setAutoDefault(False)
+        browse.setFixedWidth(96)
+        browse.clicked.connect(self._browse_exe)
+        exe_row.addWidget(browse)
+        form.addLayout(exe_row, 2, 1, 1, 2)
+
+        from .core import format_time
+        form.addWidget(field_label("Total time"), 3, 0)
+        time_row = QHBoxLayout()
+        time_row.setSpacing(10)
+        self.time_edit = QLineEdit(format_time(game.get("total_seconds", 0)))
+        self._total_text = self.time_edit.text()
+        self.time_edit.setPlaceholderText("e.g. 3h15m, 195m, 3:15:00")
+        time_row.addWidget(self.time_edit, 1)
+        cur_time = QLabel(tr("Current: %s") % format_time(game.get("total_seconds", 0)))
+        cur_time.setObjectName("sub")
+        time_row.addWidget(cur_time)
+        form.addLayout(time_row, 3, 1, 1, 2)
+
+        form.addWidget(field_label("VNDB ID / link"), 4, 0)
+        self.vndb_edit = QLineEdit(game.get("vndb_id") or "")
+        self.vndb_edit.setPlaceholderText("v64038 or https://vndb.org/v64038")
+        form.addWidget(self.vndb_edit, 4, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        search_enabled = bool(((window.config or {}).get("vndb") or {}).get("enable_search", True))
+        self.search_vndb_btn = QPushButton(tr("Search\u2026"))
+        self.search_vndb_btn.setAutoDefault(False)
+        self.search_vndb_btn.setVisible(search_enabled)
+        self.search_vndb_btn.clicked.connect(self._search_vndb)
+        btn_row.addWidget(self.search_vndb_btn)
+
+        self.fetch_btn = QPushButton(tr("Fetch metadata & ratings").replace("&", "&&"))
+        self.fetch_btn.setAutoDefault(False)
+        self.fetch_btn.clicked.connect(self._fetch_all)
+        btn_row.addWidget(self.fetch_btn)
+
+        cover_button = QPushButton(tr("Change cover\u2026"))
+        cover_button.setAutoDefault(False)
+        cover_button.clicked.connect(self._pick_cover)
+        btn_row.addWidget(cover_button)
+        form.addLayout(btn_row, 4, 2)
+
+        src_row = QHBoxLayout()
+        src_row.setSpacing(16)
+        self.manual_box = QCheckBox(tr("Manual (show when VNDB sync is off)"))
+        self.manual_box.setChecked(bool(game.get("manual", True)))
+        self.manual_box.toggled.connect(self._refresh_summary)
+        src_row.addWidget(self.manual_box)
+        self.vndb_list_box = QCheckBox(tr("On VNDB List (synced)"))
+        self.vndb_list_box.setChecked(bool(game.get("vndb_synced", False)))
+        self.vndb_list_box.toggled.connect(self._refresh_summary)
+        src_row.addWidget(self.vndb_list_box)
+        src_row.addStretch(1)
+        form.addLayout(src_row, 5, 1, 1, 2)
+
+        # Collapsible Advanced fields on a transparent background (no dark box)
+        self.adv_toggle = QCheckBox(tr("Show advanced fields (extra processes, Bangumi / EGS IDs)"))
+        self.adv_toggle.setChecked(False)
+        form.addWidget(self.adv_toggle, 6, 1, 1, 2)
+
+        self.adv_panel = QWidget()
+        self.adv_panel.setObjectName("transparentpanel")
+        self.adv_panel.setStyleSheet("QWidget#transparentpanel{background:transparent;}")
+        adv_grid = QGridLayout(self.adv_panel)
+        adv_grid.setContentsMargins(0, 4, 0, 0)
+        adv_grid.setHorizontalSpacing(12)
+        adv_grid.setVerticalSpacing(8)
+        adv_grid.setColumnStretch(1, 1)
+
+        adv_grid.addWidget(field_label("Extra process names"), 0, 0)
+        self.proc_edit = QLineEdit(", ".join(game.get("process_names") or []))
+        self.proc_edit.setPlaceholderText(
+            tr("Optional, comma-separated — only needed if the game spawns an .exe outside its folder"))
+        adv_grid.addWidget(self.proc_edit, 0, 1)
+
+        adv_grid.addWidget(field_label("Bangumi / EGS ID"), 1, 0)
+        id_row = QHBoxLayout()
+        id_row.setSpacing(10)
+        self.bgm_edit = QLineEdit(game.get("bangumi_id") or "")
+        self.bgm_edit.setPlaceholderText(tr("Bangumi ID (auto)"))
+        self.egs_edit = QLineEdit(game.get("egs_id") or "")
+        self.egs_edit.setPlaceholderText(tr("ErogameScape ID (auto)"))
+        id_row.addWidget(self.bgm_edit, 1)
+        id_row.addWidget(self.egs_edit, 1)
+        adv_grid.addLayout(id_row, 1, 1)
+        self.adv_panel.setVisible(False)
+        self.adv_toggle.toggled.connect(self.adv_panel.setVisible)
+        form.addWidget(self.adv_panel, 7, 0, 1, 3)
+
+        details_box.addLayout(form)
+        body.addWidget(details_card)
+
+        # ---------------- 2. Embedded VNDB List Block ----------------
+        self.vndb_list_block = VndbListBlock(
+            content, window, game, on_updated=self._on_vndb_list_updated
+        )
+        body.addWidget(self.vndb_list_block)
+
+        # ---------------- 3. Routes Card ----------------
+        routes_card, routes_box = make_card("ROUTES")
+        routes_box.setSpacing(8)
+        hint = QLabel(tr("Track route times manually. Kept with this game without affecting the session clock or statistics."))
+        hint.setObjectName("help")
+        hint.setWordWrap(True)
+        routes_box.addWidget(hint)
+
+        self.routes_editor = RoutesEditor(routes_card, self.window.engine, self.game)
+        self.routes_editor.setMinimumHeight(140)
+        routes_box.addWidget(self.routes_editor)
+        body.addWidget(routes_card)
+        body.addStretch(1)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(2, 4, 2, 0)
+        buttons.setSpacing(10)
+        buttons.addStretch(1)
+        cancel = QPushButton(tr("Cancel"))
+        cancel.setAutoDefault(False)
+        cancel.setMinimumWidth(92)
+        cancel.clicked.connect(self.reject)
+        save = QPushButton(tr("Save"))
+        save.setObjectName("primary")
+        save.setAutoDefault(False)
+        save.setDefault(False)
+        save.setMinimumWidth(92)
+        save.clicked.connect(self._save)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        outer.addLayout(buttons)
+
+        self._fetch_signals = FetchSignals(self)
+        self._fetch_signals.done.connect(self._on_fetched)
+        self._refresh_summary()
+        self._refresh_cover()
+        self.vndb_list_block.load_for(self.vndb_edit.text())
+
+    def _build_start_menu(self):
+        lib = getattr(self.window, "library_page", None)
+        if lib is not None and hasattr(lib, "build_start_menu_for"):
+            return lib.build_start_menu_for(
+                self._launch_target, parent=self,
+                after_action=lambda g, launcher: lib.start_game(g, launcher=launcher),
+            )
+        menu = QMenu(self)
+        menu.addAction(tr("Start (normal)"))
+        return menu
+
+    def _launch_target(self):
+        # Use currently typed .exe so user can test launching before clicking Save
+        exe_text = self.exe_edit.text().strip()
+        if exe_text and exe_text != (self.game.get("exe") or "").strip():
+            self.game["exe"] = exe_text
+        return self.game
+
+    def _on_vndb_list_updated(self):
+        self.vndb_list_box.setChecked(bool(self.game.get("vndb_synced", False)))
+        self._refresh_summary()
+
+    def _refresh_summary(self, *_args):
+        is_manual = bool(self.manual_box.isChecked())
+        is_synced = bool(self.vndb_list_box.isChecked())
+        if is_manual and is_synced:
+            self.source_pill.setText(tr("Manual + VNDB List"))
+        elif is_manual:
+            self.source_pill.setText(tr("Manual"))
+        elif is_synced:
+            self.source_pill.setText(tr("Synced from VNDB"))
+        else:
+            self.source_pill.setText(tr("Hidden"))
+
+        g = self.game
+        self.header_meta.setText("%s  \u00b7  %s" % (g.get("developer") or "Unknown", g.get("year") or "????"))
+
+        vn_avg = g.get("rating_average") or "N/A"
+        vn_w = g.get("rating_weighted") or vn_avg
+        vn_rank = g.get("vndb_rank") or "N/A"
+        vn_pop = g.get("vndb_popularity") or "N/A"
+        vn_votes = g.get("vndb_votes") or "N/A"
+        self._rate_tiles["vndb"][0].setText(
+            f"{vn_w} / {vn_avg}" if (vn_w != "N/A" or vn_avg != "N/A") else "N/A"
+        )
+        self._rate_tiles["vndb"][1].setText(
+            f"{tr('Rank')} {vn_rank}  \u00b7  {tr('Popularity')} {vn_pop}\n"
+            f"{vn_votes} {tr('votes')}"
+        )
+
+        bg_r = g.get("bangumi_rating") or "N/A"
+        bg_rank = g.get("bangumi_rank") or "N/A"
+        bg_votes = g.get("bangumi_votes") or "N/A"
+        self._rate_tiles["bangumi"][0].setText(str(bg_r))
+        self._rate_tiles["bangumi"][1].setText(f"{tr('Rank')} {bg_rank}\n{bg_votes} {tr('votes')}")
+
+        eg_m = g.get("egs_median") or "N/A"
+        eg_a = g.get("egs_average") or "N/A"
+        eg_rank = g.get("egs_rank") or "N/A"
+        eg_votes = g.get("egs_votes") or "N/A"
+        self._rate_tiles["egs"][0].setText(
+            f"{eg_m} / {eg_a}" if (eg_m != "N/A" or eg_a != "N/A") else "N/A"
+        )
+        self._rate_tiles["egs"][1].setText(
+            f"{tr('Rank')} {eg_rank}\n{eg_votes} {tr('votes')}"
+        )
+
+        self.vndb_info.setText(self._describe(g))
+
+    def _refresh_cover(self):
+        url = (self.game.get("image") or "").strip()
+        if not url:
+            self._cover_url = ""
+            self.cover_thumb.setPixmap(QPixmap())
+            self.cover_thumb.setText("VN")
+            return
+        if url == self._cover_url:
+            return
+        self._cover_url = url
+        request = getattr(self.window, "request_cover", None)
+        if callable(request):
+            request(url, self._apply_cover)
+
+    def _apply_cover(self, url, image):
+        if url != self._cover_url or image is None or image.isNull():
+            return
+        self.cover_thumb.setPixmap(
+            rounded_pixmap(fill_pixmap(image, 96, 136, self.cover_thumb), 8))
 
     @staticmethod
     def _describe(game):
-        return ("%s | %s\nAverage %s   Weighted %s"
-                % (game.get("developer") or "Unknown", game.get("year") or "????",
-                   game.get("rating_average") or "N/A",
-                   game.get("rating_weighted") or "N/A"))
+        labels = game.get("vndb_labels") or []
+        vote = game.get("vndb_vote") or ""
+        notes = (game.get("vndb_notes") or "").strip()
+        parts = []
+        if labels:
+            parts.append("%s: %s" % (tr("VNDB List"), ", ".join(str(x) for x in labels)))
+        if vote:
+            parts.append("%s: %s" % (tr("Your vote"), vote))
+        if notes:
+            parts.append("%s: %s" % (tr("Notes"), notes[:80] + ("…" if len(notes) > 80 else "")))
+        return "  \u00b7  ".join(parts)
 
     def _browse_exe(self):
         from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(self, "Select executable", "",
+        path, _ = QFileDialog.getOpenFileName(self, tr("Select executable"), "",
                                               "Executable (*.exe)")
         if path:
             self.exe_edit.setText(str(Path(path).resolve()))
+            self.manual_box.setChecked(True)
+
+    def _search_vndb(self):
+        seed = self.title_edit.text().strip() or self.romanised_edit.text().strip()
+        dlg = VndbSearchDialog(self.window, initial_query=seed)
+        if dlg.exec() and dlg.selected:
+            info = dlg.selected
+            self.vndb_edit.setText(info.get("id") or "")
+            if not self.title_edit.text().strip():
+                self.title_edit.setText(info.get("original") or info.get("title") or "")
+            if not self.romanised_edit.text().strip():
+                self.romanised_edit.setText(info.get("romanized") or "")
+            self._fetch_all()
+            self.vndb_list_block.load_for(self.vndb_edit.text())
 
     def _pick_cover(self):
         vndb_id = (self.vndb_edit.text() or "").strip()
-        import re
         match = re.search(r"(v\d+)", vndb_id, re.I)
         if not match:
-            QMessageBox.warning(self, "Cover", "Set the VNDB id first.")
+            QMessageBox.warning(self, tr("Cover"), tr("Set the VNDB id first."))
             return
         dialog = CoverPickerDialog(self.window, match.group(1).lower())
-        if dialog.exec() and dialog.selected:
-            self.game["image"] = dialog.selected
+        if dialog.exec() and dialog.selected is not None:
+            if dialog.selected:
+                self.game["image"] = dialog.selected
+            self._refresh_cover()
             store.save_games(self.window.engine.games)
             self.window.now_page.update_from_engine()
 
-    def _fetch_vndb(self):
-        import re
-        match = re.search(r"(v\d+)", self.vndb_edit.text() or "", re.I)
-        if not match:
-            QMessageBox.warning(self, "VNDB", "Could not find a VNDB id.")
+    def _fetch_all(self):
+        raw_vndb = (self.vndb_edit.text() or "").strip()
+        match = re.search(r"(v\d+)", raw_vndb, re.I)
+        probe = dict(self.game)
+        probe["vndb_id"] = match.group(1).lower() if match else ""
+        probe["original"] = self.title_edit.text().strip() or probe.get("original") or ""
+        probe["title"] = probe["original"]
+        probe["romanized"] = self.romanised_edit.text().strip() or probe.get("romanized") or ""
+        probe["bangumi_id"] = self.bgm_edit.text().strip()
+        probe["egs_id"] = self.egs_edit.text().strip()
+        if not probe["vndb_id"] and not probe["original"] and not probe["romanized"]:
+            QMessageBox.warning(self, tr("VNDB"), tr("Enter a VNDB ID or game title first."))
             return
-        info = self.window.app.fetch_vndb(match.group(1).lower())
+        self.fetch_btn.setEnabled(False)
+        self.fetch_btn.setText(tr("Fetching\u2026"))
+        app = self.window.app
+        signals = self._fetch_signals
+
+        def worker():
+            try:
+                info = app.fetch_game_ratings(probe, skip_egs_if_blocked=False)
+            except Exception:
+                info = None
+            signals.done.emit(probe, info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fetched(self, _probe, info):
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText(tr("Fetch metadata & ratings").replace("&", "&&"))
         if not info:
-            QMessageBox.warning(self, "VNDB", "Lookup failed (network?).")
+            QMessageBox.warning(self, tr("VNDB"), tr("Lookup failed (network?)."))
             return
-        self.vndb_edit.setText(info["id"])
-        self.game.update({
-            "title": info.get("title") or "", "original": info.get("original") or "",
-            "romanized": info.get("romanized") or "",
-            "developer": info.get("developer") or "Unknown",
-            "year": info.get("year") or "????",
-            "rating_average": info.get("rating_average") or "N/A",
-            "rating_weighted": info.get("rating_weighted") or "N/A",
-        })
+        if info.get("id"):
+            self.vndb_edit.setText(info["id"])
+            if info["id"] != self.vndb_list_block.vndb_id:
+                self.vndb_list_block.load_for(info["id"])
+        merge_vndb(self.game, info)
+        if not self.game.get("image") and info.get("image"):
+            self.game["image"] = info["image"]
         if not self.title_edit.text().strip():
-            self.title_edit.setText(self.game.get("original") or "")
-        self.romanised_edit.setText(self.game.get("romanized") or "")
-        self.vndb_info.setText(self._describe(self.game))
+            self.title_edit.setText(self.game.get("original") or self.game.get("title") or "")
+        if not self.romanised_edit.text().strip():
+            self.romanised_edit.setText(self.game.get("romanized") or "")
+        if info.get("bangumi_id") and not self.bgm_edit.text().strip():
+            self.bgm_edit.setText(str(info["bangumi_id"]))
+        if info.get("egs_id") and not self.egs_edit.text().strip():
+            self.egs_edit.setText(str(info["egs_id"]))
+        self._refresh_summary()
+        self._refresh_cover()
 
     def _save(self):
         from .core import parse_time_input
@@ -7314,7 +9778,13 @@ class GameEditorDialog(QDialog):
         self.game["title"] = self.game["original"]
         self.game["romanized"] = self.romanised_edit.text().strip()
         self.game["exe"] = self.exe_edit.text().strip()
-        self.game["vndb_id"] = (self.vndb_edit.text() or "").strip()
+        raw_vndb = (self.vndb_edit.text() or "").strip()
+        m = re.search(r"(v\d+)", raw_vndb, re.I)
+        self.game["vndb_id"] = m.group(1).lower() if m else raw_vndb
+        self.game["bangumi_id"] = self.bgm_edit.text().strip()
+        self.game["egs_id"] = self.egs_edit.text().strip()
+        self.game["manual"] = bool(self.manual_box.isChecked())
+        self.game["vndb_synced"] = bool(self.vndb_list_box.isChecked())
         self.game["process_names"] = [name.strip() for name in
                                       (self.proc_edit.text() or "").split(",")
                                       if name.strip()]
@@ -7498,93 +9968,197 @@ class SessionsDialog(QDialog):
 
 
 class AddGameDialog(QDialog):
-    """One panel for a new entry: exe + VNDB (required) + old playtime + process names."""
+    """Add a game by executable + VNDB search (or link/ID) + optional playtime."""
 
     def __init__(self, window):
         super().__init__(window)
         self.window = window
         self.game = None
-        self.setWindowTitle("Add game")
-        self.setMinimumWidth(560)
+        self._req_id = 0
+        self.setWindowTitle(tr("Add game"))
+        self.setMinimumWidth(600)
         outer = QVBoxLayout(self)
         form = QGridLayout()
         form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
 
         def help_label(text, row):
-            label = QLabel(text)
+            label = QLabel(tr(text))
             label.setObjectName("help")
             label.setWordWrap(True)
             form.addWidget(label, row, 1, 1, 2)
+            return label
 
-        form.addWidget(QLabel("Executable"))
+        form.addWidget(QLabel(tr("Executable")), 0, 0)
         self.exe_edit = QLineEdit()
+        self.exe_edit.setPlaceholderText(tr("Path to the game's .exe file"))
         form.addWidget(self.exe_edit, 0, 1)
-        browse = QPushButton("Browse\u2026")
+        browse = QPushButton(tr("Browse\u2026"))
+        browse.setAutoDefault(False)
         browse.clicked.connect(self._browse)
         form.addWidget(browse, 0, 2)
-        help_label("The game's .exe (the one you would double-click).", 1)
+        help_label("Select the .exe file you launch to play the game.", 1)
 
-        form.addWidget(QLabel("VNDB id / link"), 2, 0)
+        search_enabled = bool(((window.config or {}).get("vndb") or {}).get("enable_search", True))
+        row_idx = 2
+        if search_enabled:
+            form.addWidget(QLabel(tr("Search VNDB")), row_idx, 0)
+            self.search_edit = QLineEdit()
+            self.search_edit.setPlaceholderText(tr("Search by title (e.g. Steins;Gate, CLANNAD)…"))
+            self.search_edit.returnPressed.connect(self._search_vndb)
+            form.addWidget(self.search_edit, row_idx, 1)
+            self.search_btn = QPushButton(tr("Search"))
+            self.search_btn.setAutoDefault(False)
+            self.search_btn.clicked.connect(self._search_vndb)
+            form.addWidget(self.search_btn, row_idx, 2)
+            row_idx += 1
+
+            self.search_status = QLabel("")
+            self.search_status.setObjectName("help")
+            self.search_status.hide()
+            form.addWidget(self.search_status, row_idx, 1, 1, 2)
+            row_idx += 1
+
+            self.search_list = QListWidget()
+            self.search_list.setMaximumHeight(135)
+            self.search_list.hide()
+            self.search_list.itemClicked.connect(self._pick_search_result)
+            self.search_list.itemDoubleClicked.connect(self._pick_search_result)
+            form.addWidget(self.search_list, row_idx, 1, 1, 2)
+            row_idx += 1
+        else:
+            self.search_edit = None
+            self.search_list = None
+
+        form.addWidget(QLabel(tr("VNDB ID / link")), row_idx, 0)
         self.vndb_edit = QLineEdit()
-        form.addWidget(self.vndb_edit, 2, 1, 1, 2)
-        help_label("Required. A link like https://vndb.org/v64038 or just v64038.  "
-                   "Use the \u201cHow to get ID?\u201d button in Settings if you are unsure.",
-                   3)
+        self.vndb_edit.setPlaceholderText("v64038 or https://vndb.org/v64038")
+        form.addWidget(self.vndb_edit, row_idx, 1, 1, 2)
+        row_idx += 1
+        help_label(
+            "Paste a VNDB page link (e.g. https://vndb.org/v64038) or ID (v64038), or pick a result above.",
+            row_idx,
+        )
+        row_idx += 1
 
-        form.addWidget(QLabel("Previous play time"), 4, 0)
+        form.addWidget(QLabel(tr("Previous play time")), row_idx, 0)
         self.time_edit = QLineEdit()
-        form.addWidget(self.time_edit, 4, 1, 1, 2)
-        help_label("Optional. Time you read this VN before \u2013 e.g. 3h15m, 195m, 3:15:00.",
-                   5)
+        self.time_edit.setPlaceholderText("0h")
+        form.addWidget(self.time_edit, row_idx, 1, 1, 2)
+        row_idx += 1
+        help_label("Optional. Existing playtime before adding to Hygger Presence (e.g. 3h15m, 195m, 3:15:00).", row_idx)
+        row_idx += 1
 
-        form.addWidget(QLabel("Extra process names"), 6, 0)
+        form.addWidget(QLabel(tr("Extra process names")), row_idx, 0)
         self.proc_edit = QLineEdit()
-        form.addWidget(self.proc_edit, 6, 1, 1, 2)
-        help_label("Optional, comma separated. Only needed when the game starts another "
-                   ".exe than the one above; executables inside the game folder are found "
-                   "automatically.", 7)
+        form.addWidget(self.proc_edit, row_idx, 1, 1, 2)
+        row_idx += 1
+        help_label(
+            "Optional, comma-separated. Only needed if the game runs under an .exe outside its folder.",
+            row_idx,
+        )
+        row_idx += 1
 
-        form.setRowStretch(8, 1)
+        form.setRowStretch(row_idx, 1)
         outer.addLayout(form)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(tr("Cancel"))
+        cancel.setAutoDefault(False)
         cancel.clicked.connect(self.reject)
-        add = QPushButton("Add")
-        add.setObjectName("primary")
-        add.clicked.connect(self._add)
+        self.add_btn = QPushButton(tr("Add"))
+        self.add_btn.setObjectName("primary")
+        self.add_btn.setAutoDefault(False)
+        self.add_btn.setDefault(False)
+        self.add_btn.clicked.connect(self._add)
         buttons.addWidget(cancel)
-        buttons.addWidget(add)
+        buttons.addWidget(self.add_btn)
         outer.addLayout(buttons)
+
+        self._search_signals = VndbSearchSignals(self)
+        self._search_signals.done.connect(self._on_search_results)
 
     def _browse(self):
         from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(self, "Select game executable", "",
+        path, _ = QFileDialog.getOpenFileName(self, tr("Select game executable"), "",
                                               "Executable (*.exe)")
         if path:
             self.exe_edit.setText(str(Path(path).resolve()))
+            if self.search_edit is not None and not self.search_edit.text().strip():
+                self.search_edit.setText(Path(path).stem)
+
+    def _search_vndb(self):
+        if self.search_edit is None:
+            return
+        query = self.search_edit.text().strip()
+        if not query:
+            return
+        self._req_id += 1
+        rid = self._req_id
+        self.search_btn.setEnabled(False)
+        self.search_status.setText(tr("Searching VNDB…"))
+        self.search_status.show()
+        self.search_list.clear()
+        app = self.window.app
+        signals = self._search_signals
+
+        def worker():
+            try:
+                rows = app.search_vndb(query, limit=12)
+            except Exception:
+                rows = []
+            signals.done.emit(rid, rows)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_search_results(self, rid, rows):
+        if rid != self._req_id or self.search_edit is None:
+            return
+        self.search_btn.setEnabled(True)
+        self.search_list.clear()
+        if not rows:
+            self.search_list.hide()
+            self.search_status.setText(tr("No matching visual novels found."))
+            self.search_status.show()
+            return
+        self.search_status.setText(tr("Click a result to fill the VNDB ID:"))
+        self.search_status.show()
+        for info in rows:
+            title = info.get("original") or info.get("title") or info.get("id")
+            rom = info.get("romanized") or ""
+            extra = f" / {rom}" if rom and rom != title else ""
+            item = QListWidgetItem("[%s] %s%s (%s)" % (
+                info.get("id", ""), title, extra, info.get("year") or "????"))
+            item.setData(Qt.UserRole, info)
+            self.search_list.addItem(item)
+        self.search_list.show()
+
+    def _pick_search_result(self, item):
+        info = item.data(Qt.UserRole) or {}
+        if info.get("id"):
+            self.vndb_edit.setText(info["id"])
 
     def _add(self):
-        import re
         from .core import parse_time_input
         exe = self.exe_edit.text().strip()
         if not exe or not Path(exe).exists():
-            QMessageBox.warning(self, "Add game", tr("Pick an existing .exe first."))
+            QMessageBox.warning(self, tr("Add game"), tr("Pick an existing .exe first."))
             return
         match = re.search(r"(v\d+)", self.vndb_edit.text() or "", re.I)
         if not match:
-            QMessageBox.warning(self, "Add game",
-                                tr("A VNDB id is required (e.g. v64038)."))
+            QMessageBox.warning(self, tr("Add game"),
+                                tr("Enter a VNDB ID (e.g. v64038) or pick a game from VNDB search."))
             return
         vndb_id = match.group(1).lower()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            info = self.window.app.fetch_vndb(vndb_id)
+            info = self.window.app.fetch_game_ratings(
+                {"vndb_id": vndb_id}, skip_egs_if_blocked=True)
         finally:
             QApplication.restoreOverrideCursor()
-        if not info:
-            QMessageBox.warning(self, "Add game",
+        if not info or not info.get("id"):
+            QMessageBox.warning(self, tr("Add game"),
                                 tr("Could not fetch that VN from VNDB (network?)."))
             return
         self.game = {
@@ -7597,6 +10171,19 @@ class AddGameDialog(QDialog):
             "year": info.get("year") or "????",
             "rating_average": info.get("rating_average") or "N/A",
             "rating_weighted": info.get("rating_weighted") or "N/A",
+            "vndb_rank": info.get("vndb_rank") or "N/A",
+            "vndb_popularity": info.get("vndb_popularity") or "N/A",
+            "vndb_votes": info.get("vndb_votes") or "N/A",
+            "bangumi_id": info.get("bangumi_id") or "",
+            "bangumi_rating": info.get("bangumi_rating") or "N/A",
+            "bangumi_rank": info.get("bangumi_rank") or "N/A",
+            "bangumi_votes": info.get("bangumi_votes") or "N/A",
+            "egs_id": info.get("egs_id") or "",
+            "egs_median": info.get("egs_median") or "N/A",
+            "egs_average": info.get("egs_average") or "N/A",
+            "egs_rank": info.get("egs_rank") or "N/A",
+            "egs_votes": info.get("egs_votes") or "N/A",
+            "manual": True,
             "process_names": [name.strip() for name in
                               (self.proc_edit.text() or "").split(",") if name.strip()],
             "total_seconds": parse_time_input(self.time_edit.text()),
@@ -8254,7 +10841,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.apply_theme()
         self._setup_icon()
         self._dark_filter = DarkDialogFilter(
-            lambda: self.palette is DARK)
+            lambda: self.palette is DARK,
+            get_palette=lambda: _build_qpalette(self.palette),
+        )
         QApplication.instance().installEventFilter(self._dark_filter)
         self._setup_tray()
         # Detection is event driven: a window-show hook and the foreground hook
@@ -8283,6 +10872,7 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self.tick()
         self.update_info = None
         QTimer.singleShot(2500, self.startup_update_check)
+        QTimer.singleShot(3200, self.startup_vndb_sync)
         # a Startup shortcut that points at a file which no longer exists would
         # silently start nothing; this costs one stat() in the normal case
         try:
@@ -8562,9 +11152,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
     def goto_launchers(self):
         """Settings > Launchers (used by the Start menu)."""
-        self.go(3)
+        self.go(4)
         try:
-            self.settings_page.tabs.setCurrentIndex(2)
+            self.settings_page.tabs.setCurrentWidget(self.settings_page.launchers_tab)
         except Exception:
             pass
 
@@ -8582,9 +11172,9 @@ class MainWindow(ScreenshotMixin, QMainWindow):
     def _sidebar_menu(self):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        for index, label in enumerate(("Library", "Now reading", "Statistics",
+        for index, label in enumerate(("Library", "Detection", "Statistics",
                                        "Screenshots", "Settings")):
-            menu.addAction(label, lambda i=index: self.go(i))
+            menu.addAction(tr(label), lambda i=index: self.go(i))
         menu.addSeparator()
         menu.addAction(tr("Show sidebar"), self.toggle_sidebar)
         menu.popup(self.burger.mapToGlobal(self.burger.rect().bottomLeft()))
@@ -8791,29 +11381,42 @@ class MainWindow(ScreenshotMixin, QMainWindow):
 
     def apply_theme(self):
         self.palette_bg = self.palette["bg"]
+        qapp = QApplication.instance()
+        if qapp is not None:
+            qapp.setPalette(_build_qpalette(self.palette))
         palette = dict(self.palette)
         palette["check"] = check_icon_path()
         palette["arrow"] = arrow_icon_path()
-        self.setStyleSheet(qss(palette))
-        # an id rule on the window stylesheet does not reach this widget, so give
-        # the title bar its own stylesheet
-        self.title_line.update()
-        self.title_frame.update()
-        self.title_bar.update()
-        if hasattr(self, "shots_page"):
-            self.shots_page._fill()
-        if hasattr(self, "settings_page"):
-            self.settings_page.refresh_variables()
-        moon = self.palette is DARK
-        self.title_bar.theme_button.setIcon(
-            paint_moon(hole=self.palette["bg"]) if moon
-            else paint_sun())
-        self.now_page.update_from_engine()
-        if hasattr(self, "library_page"):
-            self.library_page.update_icons()
-        if hasattr(self, "stats_page"):
-            # the cards keep their colours in an inline stylesheet
-            self.stats_page.refresh()
+        self.setUpdatesEnabled(False)
+        try:
+            self.setStyleSheet(qss(palette))
+            self.title_line.update()
+            self.title_frame.update()
+            self.title_bar.update()
+            if hasattr(self, "shots_page"):
+                if self.shots_page.isVisible():
+                    self.shots_page._fill()
+                else:
+                    self.shots_page._dirty = True
+            if hasattr(self, "settings_page"):
+                if self.settings_page.isVisible():
+                    self.settings_page.refresh_variables()
+                else:
+                    self.settings_page._vars_dirty = True
+            moon = self.palette is DARK
+            self.title_bar.theme_button.setIcon(
+                paint_moon(hole=self.palette["bg"]) if moon
+                else paint_sun())
+            self.now_page.update_from_engine()
+            if hasattr(self, "library_page"):
+                self.library_page.update_icons()
+            if hasattr(self, "stats_page"):
+                if self.stats_page.isVisible():
+                    self.stats_page.refresh()
+                else:
+                    self.stats_page._theme_dirty = True
+        finally:
+            self.setUpdatesEnabled(True)
 
     def request_cover(self, url, callback):
         if not url:
@@ -8870,6 +11473,8 @@ class MainWindow(ScreenshotMixin, QMainWindow):
                     image = image.scaled(COVER_MAX, Qt.KeepAspectRatio,
                                          Qt.SmoothTransformation)
                 self.app.cover_cache[url] = image
+                while len(self.app.cover_cache) > MAX_COVER_RAM:
+                    self.app.cover_cache.popitem(last=False)
             else:
                 self.app.cover_cache[url] = None
             self.app.cover_bytes.pop(url, None)
@@ -9000,8 +11605,14 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             self.clock_timer.stop()
             self.idle_timer.start(self.IDLE_TICK_MS)
 
+    def startup_vndb_sync(self):
+        vcfg = (self.config or {}).get("vndb") or {}
+        if (vcfg.get("enable_list_sync") and vcfg.get("auto_sync_on_start")
+                and (vcfg.get("api_token") or "").strip()):
+            self.library_page.sync_vndb_library(silent=True)
+
     def _maybe_auto_fetch(self):
-        """Refresh one game's VNDB data when it starts, if the user asked for it."""
+        """Refresh metadata/ratings and optionally mark Playing on VNDB when a game starts."""
         game = self.engine.game
         key = None
         if game is not None and self.engine.status == "Reading":
@@ -9009,10 +11620,16 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         if key == getattr(self, "_auto_fetch_key", None):
             return
         self._auto_fetch_key = key
-        if key is None or not (self.config or {}).get("auto_fetch_vndb"):
+        if key is None:
+            return
+        cfg = self.config or {}
+        vcfg = cfg.get("vndb") or {}
+        do_fetch = bool(cfg.get("auto_fetch_vndb"))
+        do_mark = bool(vcfg.get("auto_mark_playing") and (vcfg.get("api_token") or "").strip())
+        if not do_fetch and not do_mark:
             return
         vndb_id = (game.get("vndb_id") or "").strip().lower()
-        if not vndb_id:
+        if not vndb_id and not do_fetch:
             return
         signals = getattr(self, "_fetch_signals", None)
         if signals is None:
@@ -9027,12 +11644,27 @@ class MainWindow(ScreenshotMixin, QMainWindow):
             signals.done.connect(apply_fetch)
             self._fetch_signals = signals
         app = self.app
+        token = (vcfg.get("api_token") or "").strip()
 
         def worker():
-            try:
-                info = app.fetch_vndb(vndb_id)
-            except Exception:
-                info = None
+            info = None
+            if do_fetch:
+                try:
+                    info = app.fetch_game_ratings(game, skip_egs_if_blocked=True)
+                except Exception:
+                    info = None
+            if do_mark and vndb_id:
+                try:
+                    from .vndb import mark_playing
+                    if mark_playing(vndb_id, token):
+                        info = info or {}
+                        labels = list(game.get("vndb_labels") or [])
+                        if "Playing" not in labels:
+                            labels = [x for x in labels if x not in ("Stalled", "Dropped", "Wishlist")]
+                            labels.insert(0, "Playing")
+                        info["vndb_labels"] = labels
+                except Exception:
+                    pass
             signals.done.emit(game, info)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -9058,7 +11690,8 @@ class MainWindow(ScreenshotMixin, QMainWindow):
         self._maybe_auto_fetch()
         # refresh on this clock too: it is the same 1 s the engine ticked on,
         # so the row cannot fall behind the number it is showing
-        self.library_page._live_refresh()
+        if self.library_page.isVisible():
+            self.library_page._live_refresh()
 
     def add_game_dialog(self):
         from PySide6.QtWidgets import QFileDialog, QInputDialog
@@ -9122,7 +11755,7 @@ class Application:
         # totals are only reconciled when the user asks for it (Library ->
         # Sync totals); raising them on startup made Detection jump on its
         # own, which looked like the app inventing play time
-        self.cover_cache = {}
+        self.cover_cache = OrderedDict()
         self.cover_bytes = {}
         self.cover_pending = set()
         self.cover_retried = set()
@@ -9154,7 +11787,7 @@ class Application:
         # shutdown() so "Later" really means "when you close the app"
         self.pending_update = None
 
-    USER_AGENT = ("HyggerPresence/2.3.2 "
+    USER_AGENT = ("HyggerPresence/2.4.0 "
                   "(+https://github.com/hyther1111/HyggerPresence)")
 
     def fetch(self, url):
@@ -9200,9 +11833,33 @@ class Application:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def vndb_token(self):
+        return ((self.config.get("vndb") or {}).get("api_token") or "").strip()
+
     def fetch_vndb(self, vndb_id):
         from .vndb import fetch_vndb
-        return fetch_vndb(vndb_id)
+        r_cfg = self.config.get("ratings") or {}
+        return fetch_vndb(
+            vndb_id,
+            token=self.vndb_token(),
+            include_ranks=bool(r_cfg.get("fetch_vndb_rank", True)),
+        )
+
+    def fetch_game_ratings(self, game, skip_egs_if_blocked=True):
+        from .ratings import fetch_all_ratings
+        r_cfg = self.config.get("ratings") or {}
+        return fetch_all_ratings(
+            game,
+            token=self.vndb_token(),
+            fetch_vndb_rank=bool(r_cfg.get("fetch_vndb_rank", True)),
+            fetch_bangumi_flag=bool(r_cfg.get("fetch_bangumi", True)),
+            fetch_egs_flag=bool(r_cfg.get("fetch_erogamescape", True)),
+            skip_egs_if_blocked=skip_egs_if_blocked,
+        )
+
+    def search_vndb(self, query, limit=15):
+        from .vndb import search_vndb
+        return search_vndb(query, token=self.vndb_token(), limit=limit)
 
     def shutdown(self):
         # 2.3.2: an older copy of the app still running in the tray used to write

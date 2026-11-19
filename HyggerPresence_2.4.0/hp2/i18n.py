@@ -111,12 +111,21 @@ def _sources():
     return sources
 
 
-def register_tree(root):
-    """Remember every widget whose English text we know a translation for."""
-    from PySide6.QtWidgets import (QComboBox, QLineEdit, QMenu, QTabWidget,
-                                   QTableWidget, QWidget)
+def _escape_amp(text):
+    """Preserve literal '&' in Qt buttons/tabs instead of creating '_' mnemonics."""
+    s = str(text or "")
+    if "&" not in s:
+        return s
+    return s.replace("&&", "\x00").replace("&", "&&").replace("\x00", "&&")
+
+
+def _collect_entries(root):
+    """Collect translatable widget entries under `root` without mutating _registry."""
+    from PySide6.QtWidgets import (QAbstractButton, QComboBox, QLineEdit, QMenu,
+                                   QTabWidget, QTableWidget, QWidget)
     sources = _sources()
-    record = _registry.append
+    entries = []
+    record = entries.append
     for child in root.findChildren(QWidget):
         # never touch input fields: their text is user data, not a label
         if isinstance(child, QLineEdit):
@@ -125,8 +134,10 @@ def register_tree(root):
             text = child.text()
         except Exception:
             text = None
-        if text and text in sources:
-            record(["text", child, text])
+        if text:
+            raw_text = text.replace("&&", "&") if isinstance(child, QAbstractButton) else text
+            if raw_text in sources:
+                record(["text", child, raw_text, isinstance(child, QAbstractButton)])
         # tooltips are user visible too: without this every hover text stayed
         # English no matter which language was chosen
         try:
@@ -138,8 +149,9 @@ def register_tree(root):
     for tabs in root.findChildren(QTabWidget):
         for index in range(tabs.count()):
             caption = tabs.tabText(index)
-            if caption in sources:
-                record(["tab", tabs, index, caption])
+            raw_cap = caption.replace("&&", "&")
+            if raw_cap in sources:
+                record(["tab", tabs, index, raw_cap])
     for combo in root.findChildren(QComboBox):
         for index in range(combo.count()):
             caption = combo.itemText(index)
@@ -148,8 +160,9 @@ def register_tree(root):
     for menu in root.findChildren(QMenu):
         for action in menu.actions():
             caption = action.text()
-            if caption in sources:
-                record(["action", action, caption])
+            raw_cap = caption.replace("&&", "&")
+            if raw_cap in sources:
+                record(["action", action, raw_cap])
     for line in root.findChildren(QLineEdit):
         hint = line.placeholderText()
         if hint and hint in sources:
@@ -161,13 +174,58 @@ def register_tree(root):
             caption = item.text() if item is not None else ""
             if caption and caption in sources:
                 record(["header", table, index, caption])
+    return entries
+
+
+def _apply_entries(entries):
+    """Apply active language translations to the given entry list."""
+    from PySide6.QtWidgets import QLineEdit as _Line
+    alive = []
+    for entry in entries:
+        kind = entry[0]
+        try:
+            if kind == "text":
+                widget = entry[1]
+                if isinstance(widget, _Line):
+                    continue
+                translated = tr(entry[2])
+                if len(entry) > 3 and entry[3]:
+                    translated = _escape_amp(translated)
+                widget.setText(translated)
+            elif kind == "tab":
+                entry[1].setTabText(entry[2], _escape_amp(tr(entry[3])))
+            elif kind == "item":
+                combo, index = entry[1], entry[2]
+                current = combo.currentIndex()
+                combo.setItemText(index, tr(entry[3]))
+                combo.setCurrentIndex(current)
+            elif kind == "action":
+                entry[1].setText(_escape_amp(tr(entry[2])))
+            elif kind == "tip":
+                entry[1].setToolTip(tr(entry[2]))
+            elif kind == "hint":
+                entry[1].setPlaceholderText(tr(entry[2]))
+            elif kind == "header":
+                item = entry[1].horizontalHeaderItem(entry[2])
+                if item is not None:
+                    item.setText(tr(entry[3]))
+            alive.append(entry)
+        except Exception:
+            continue
+    return alive
+
+
+def register_tree(root):
+    """Remember every widget in the persistent main tree whose text has a translation."""
+    _registry.extend(_collect_entries(root))
     return len(_registry)
 
 
 def apply_to(root):
-    """Register a freshly built tree (a dialog) and translate it right away."""
-    register_tree(root)
-    return apply_language(_current, root=None)
+    """Translate a freshly built dialog tree without touching MainWindow or leaking entries."""
+    entries = _collect_entries(root)
+    _apply_entries(entries)
+    return len(entries)
 
 
 class _ShowFilter(QObject):
@@ -207,35 +265,10 @@ def install(app):
 
 
 def apply_language(code, root=None):
-    """Translate the live UI (the first call also remembers the sources)."""
+    """Translate the persistent live UI (the first call also remembers the sources)."""
+    global _registry
     set_language(code)
     if root is not None and not _registry:
         register_tree(root)
-    for entry in _registry:
-        kind = entry[0]
-        try:
-            if kind == "text":
-                from PySide6.QtWidgets import QLineEdit as _Line
-                if isinstance(entry[1], _Line):
-                    continue
-                entry[1].setText(tr(entry[2]))
-            elif kind == "tab":
-                entry[1].setTabText(entry[2], tr(entry[3]))
-            elif kind == "item":
-                combo, index = entry[1], entry[2]
-                current = combo.currentIndex()
-                combo.setItemText(index, tr(entry[3]))
-                combo.setCurrentIndex(current)
-            elif kind == "action":
-                entry[1].setText(tr(entry[2]))
-            elif kind == "tip":
-                entry[1].setToolTip(tr(entry[2]))
-            elif kind == "hint":
-                entry[1].setPlaceholderText(tr(entry[2]))
-            elif kind == "header":
-                item = entry[1].horizontalHeaderItem(entry[2])
-                if item is not None:
-                    item.setText(tr(entry[3]))
-        except Exception:
-            continue
+    _registry = _apply_entries(_registry)
     return len(_registry)

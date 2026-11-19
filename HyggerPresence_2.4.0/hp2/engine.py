@@ -234,6 +234,12 @@ class Engine(DetectorMixin):
             value = info.get(key)
             if value and value != "N/A":
                 game[key] = _rating_text(value)
+        for key in ("vndb_rank", "vndb_popularity", "vndb_votes",
+                    "bangumi_id", "bangumi_rating", "bangumi_rank", "bangumi_votes",
+                    "egs_id", "egs_median", "egs_average", "egs_rank", "egs_votes"):
+            value = info.get(key)
+            if value and (value != "N/A" or not game.get(key)):
+                game[key] = str(value)
         if self.on_save:
             try:
                 self.on_save()
@@ -1309,6 +1315,8 @@ class Engine(DetectorMixin):
         weighted_text = _rating_text(game.get("rating_weighted"))
         if weighted_text == "N/A" and average_text != "N/A":
             weighted_text = average_text
+        labels = game.get("vndb_labels") or []
+        label_text = ", ".join(str(x) for x in labels if x) or "N/A"
         return {
             "title": game.get("original") or game.get("title") or "",
             "romanized_title": game.get("romanized") or game.get("title") or "",
@@ -1322,6 +1330,15 @@ class Engine(DetectorMixin):
             "rating_average": average_text,
             "rating_weighted": weighted_text,
             "vndb": game.get("vndb_id") or "",
+            "vndb_rank": game.get("vndb_rank") or "N/A",
+            "vndb_popularity": game.get("vndb_popularity") or "N/A",
+            "bangumi_rating": game.get("bangumi_rating") or "N/A",
+            "bangumi_rank": game.get("bangumi_rank") or "N/A",
+            "egs_median": game.get("egs_median") or "N/A",
+            "egs_average": game.get("egs_average") or "N/A",
+            "egs_rank": game.get("egs_rank") or "N/A",
+            "vndb_user_vote": game.get("vndb_vote") or "N/A",
+            "vndb_label": label_text,
         }
 
     def _build_preview(self, game, status):
@@ -1354,6 +1371,13 @@ class Engine(DetectorMixin):
             "vars": mapping,
             "vndb_id": game.get("vndb_id") or "",
         }
+
+    def refresh_active_preview(self):
+        """Rebuild cached UI preview immediately after editing the active game."""
+        if self.game is not None and self.status is not None:
+            self.preview = self._build_preview(self.game, self.status)
+            self._pushed_identity = None
+            self._notify()
 
     def _push(self, game, status):
         """Compose the payload here (cheap) and send it on the worker thread."""

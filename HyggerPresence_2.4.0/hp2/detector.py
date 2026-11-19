@@ -13,9 +13,11 @@ class DetectorMixin:
         for 30 s so a path that appears later is still picked up.
         """
         try:
-            key = str(path_str)
+            key = str(path_str).strip()
         except Exception:
             key = ""
+        if not key:
+            return None
         hit = _resolve_cache.get(key)
         if hit is not None:
             value, is_real, stamp = hit
@@ -61,14 +63,17 @@ class DetectorMixin:
         1.0.3: driven by one Toolhelp snapshot (see snapshot_processes) and the
         exe path is read only for processes whose name can match.
         """
-        target_path = self._resolved(game.get("exe", ""))
-        target_name = Path(game.get("exe", "")).name.lower() if game.get("exe") else ""
-        target_parent = target_path.parent if target_path else None
+        raw_exe = (game.get("exe") or "").strip()
         extra_names = {
             n.strip().lower()
             for n in game.get("process_names", [])
             if n.strip()
         }
+        if not raw_exe and not extra_names:
+            return set()
+        target_path = self._resolved(raw_exe)
+        target_name = Path(raw_exe).name.lower() if raw_exe else ""
+        target_parent = target_path.parent if target_path else None
         allow_name_match = self._allow_name_match(target_name)
         folder = self._game_folder(game)
         folder_ok = bool(folder) and self._folder_exclusive(game, folder)
@@ -166,10 +171,13 @@ class DetectorMixin:
 
         best, best_score, best_pids = None, -1, set()
         for g in self.games:
-            target_path = self._resolved(g.get("exe", ""))
-            target_name = Path(g.get("exe", "")).name.lower() if g.get("exe") else ""
-            target_parent = target_path.parent if target_path else None
+            raw_exe = (g.get("exe") or "").strip()
             extra_names = {n.strip().lower() for n in g.get("process_names", []) if n.strip()}
+            if not raw_exe and not extra_names:
+                continue
+            target_path = self._resolved(raw_exe)
+            target_name = Path(raw_exe).name.lower() if raw_exe else ""
+            target_parent = target_path.parent if target_path else None
             same_name = name_counts.get(target_name, 0)
 
             candidate_pids = set(by_name.get(target_name, ())) if target_name else set()

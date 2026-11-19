@@ -21,11 +21,11 @@ setlocal
 cd /d "%~dp0"
 
 REM Source folder to package. Bump this when the folder is renamed for a release.
-set "APPSRC=HyggerPresence_2.3.5"
+set "APPSRC=HyggerPresence_2.4.0"
 
 REM ---- find a Python 3.11 or newer -----------------------------------------
 set "PY="
-for %%c in ("py -3.11" "python3.11" "py -3.12" "python3.12" "py -3.13" "python3.13" "py -3" "python") do (
+for %%c in ("py -3.14" "python3.14" "py -3.13" "python3.13" "py -3.12" "python3.12" "py -3.11" "python3.11" "py -3" "python") do (
     if not defined PY (
         %%~c -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)" >nul 2>nul
         if not errorlevel 1 set "PY=%%~c"

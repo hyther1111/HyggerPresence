@@ -12,7 +12,7 @@ import os
 
 # HP_APP_DIR lets a test build point at another copy of the sources without
 # editing this file, e.g. set HP_APP_DIR=HyggerPresence_2.1.1_pretest
-APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.3.5")
+APP_DIR = Path(SPECPATH) / os.environ.get("HP_APP_DIR", "HyggerPresence_2.4.0")
 ICON = str(APP_DIR / "icon.ico")
 
 datas = [
@@ -23,7 +23,8 @@ datas = [
 # Qt ships a lot of modules this app does not use; excluding them saves tens of
 # megabytes without touching anything that is imported at runtime.
 excludes = [
-    "tkinter", "unittest", "pydoc_data", "test",
+    "tkinter", "unittest", "pydoc_data", "test", "doctest", "pdb",
+    "ensurepip", "venv", "pip", "curses", "idlelib", "lib2to3",
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
     "PySide6.QtWebChannel", "PySide6.QtWebSockets",
     "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQml",
@@ -47,7 +48,7 @@ a = Analysis(
     pathex=[str(APP_DIR)],
     binaries=[],
     datas=datas,
-    hiddenimports=["pypresence", "psutil"],
+    hiddenimports=["pypresence", "psutil", "hp2.vndb", "hp2.ratings"],
     hookspath=[],
     runtime_hooks=[],
     excludes=excludes,

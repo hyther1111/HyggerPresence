@@ -397,7 +397,64 @@ def upscaled_rect(game_hwnd, game_rect):
     return None
 
 
-def _grab_rect(rect):
+def _draw_os_cursor(user32, gdi32, memory_dc, rect):
+    """Composite the visible Windows cursor onto `memory_dc` for unscaled captures.
+
+    BitBlt omits the hardware/DWM pointer overlay, so without this the cursor is
+    always missing unless a scaler like Magpie draws a software cursor itself.
+    """
+    try:
+        handle = ctypes.c_void_p
+
+        class _CURSORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint32),
+                        ("flags", ctypes.c_uint32),
+                        ("hCursor", handle),
+                        ("ptScreenPos", _POINT)]
+
+        class _ICONINFO(ctypes.Structure):
+            _fields_ = [("fIcon", ctypes.c_int),
+                        ("xHotspot", ctypes.c_uint32),
+                        ("yHotspot", ctypes.c_uint32),
+                        ("hbmMask", handle),
+                        ("hbmColor", handle)]
+
+        user32.GetCursorInfo.argtypes = (ctypes.c_void_p,)
+        user32.GetCursorInfo.restype = ctypes.c_int
+        user32.GetIconInfo.argtypes = (handle, ctypes.c_void_p)
+        user32.GetIconInfo.restype = ctypes.c_int
+        user32.DrawIconEx.argtypes = (handle, ctypes.c_int, ctypes.c_int, handle,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+                                      handle, ctypes.c_uint)
+        user32.DrawIconEx.restype = ctypes.c_int
+
+        ci = _CURSORINFO()
+        ci.cbSize = ctypes.sizeof(_CURSORINFO)
+        if not user32.GetCursorInfo(ctypes.byref(ci)):
+            return
+        if not (ci.flags & 0x00000001) or not ci.hCursor:  # CURSOR_SHOWING
+            return
+        cx, cy = int(ci.ptScreenPos.x), int(ci.ptScreenPos.y)
+        if not rect.contains(cx, cy):
+            return
+        ii = _ICONINFO()
+        hot_x, hot_y = 0, 0
+        if user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+            try:
+                hot_x = int(ii.xHotspot or 0)
+                hot_y = int(ii.yHotspot or 0)
+            finally:
+                if ii.hbmMask:
+                    gdi32.DeleteObject(ii.hbmMask)
+                if ii.hbmColor:
+                    gdi32.DeleteObject(ii.hbmColor)
+        user32.DrawIconEx(memory_dc, cx - hot_x - rect.x(), cy - hot_y - rect.y(),
+                          ci.hCursor, 0, 0, 0, None, 0x0003)  # DI_NORMAL
+    except Exception:
+        pass
+
+
+def _grab_rect(rect, draw_cursor=False):
     """Copy a rectangle of the composited desktop, in physical pixels.
 
     Win32 coordinates go straight to BitBlt, so the grab is right on any
@@ -453,6 +510,8 @@ def _grab_rect(rect):
         if not gdi32.BitBlt(memory_dc, 0, 0, width, height, screen_dc,
                             rect.x(), rect.y(), 0x00CC0020 | 0x40000000):  # SRCCOPY | CAPTUREBLT
             return None
+        if draw_cursor:
+            _draw_os_cursor(user32, gdi32, memory_dc, rect)
         header = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), width,
                                    -height, 1, 32, 0, 0, 0, 0, 0, 0)  # top-down BI_RGB
         buffer = ctypes.create_string_buffer(width * height * 4)
@@ -469,7 +528,45 @@ def _grab_rect(rect):
     return None if pixmap.isNull() else pixmap
 
 
-def capture_window():
+def _park_cursor_outside(rect):
+    """Move cursor briefly outside `rect` (or to screen edge in fullscreen).
+
+    Returns the previous (x, y) point to restore after capture, or None.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        pt = _POINT()
+        if not user32.GetCursorPos(ctypes.byref(pt)):
+            return None
+        old_x, old_y = int(pt.x), int(pt.y)
+        vx = user32.GetSystemMetrics(76)
+        vy = user32.GetSystemMetrics(77)
+        vw = user32.GetSystemMetrics(78)
+        vh = user32.GetSystemMetrics(79)
+        v_right = vx + vw - 1
+        v_bottom = vy + vh - 1
+        # If windowed with space outside `rect`, place cursor just outside it so
+        # neither game nor Magpie draws a cursor inside the frame.
+        if rect.right() + 2 <= v_right:
+            park_x, park_y = rect.right() + 2, min(v_bottom, max(vy, old_y))
+        elif rect.left() - 2 >= vx:
+            park_x, park_y = rect.left() - 2, min(v_bottom, max(vy, old_y))
+        elif rect.bottom() + 2 <= v_bottom:
+            park_x, park_y = min(v_right, max(vx, old_x)), rect.bottom() + 2
+        elif rect.top() - 2 >= vy:
+            park_x, park_y = min(v_right, max(vx, old_x)), rect.top() - 2
+        else:
+            # Fullscreen (e.g. Magpie fullscreen): park at bottom-right edge pixel
+            park_x, park_y = v_right, v_bottom
+        if not rect.contains(old_x, old_y) and not (park_x == old_x and park_y == old_y):
+            return None
+        user32.SetCursorPos(int(park_x), int(park_y))
+        return (old_x, old_y)
+    except Exception:
+        return None
+
+
+def capture_window(hide_cursor=False):
     """What the player sees of the foreground game, title bar excluded.
 
     That is the game's client area, or the upscaled picture when Magpie (or a
@@ -482,33 +579,45 @@ def capture_window():
     # Grab the composited screen: a window grab (grabWindow(hwnd)) comes back
     # black for anything a game draws on the GPU.
     target = upscaled_rect(hwnd, rect) or rect
+    saved_cursor = None
+    if hide_cursor:
+        saved_cursor = _park_cursor_outside(target)
+        if saved_cursor is not None:
+            time.sleep(0.035)
     try:
-        from .core import debug_log
-        debug_log("capture rect %d,%d %dx%d (%s)"
-                  % (target.x(), target.y(), target.width(), target.height(),
-                     "upscaled" if target is not rect else "game window"))
-    except Exception:
-        pass
-    try:
-        pixmap = _grab_rect(target)
-    except Exception:
-        pixmap = None
-    if pixmap is not None:
-        return pixmap
+        try:
+            from .core import debug_log
+            debug_log("capture rect %d,%d %dx%d (%s)"
+                      % (target.x(), target.y(), target.width(), target.height(),
+                         "upscaled" if target is not rect else "game window"))
+        except Exception:
+            pass
+        try:
+            pixmap = _grab_rect(target, draw_cursor=(not hide_cursor and target is rect))
+        except Exception:
+            pixmap = None
+        if pixmap is not None:
+            return pixmap
 
-    # fallback: the old Qt grab of the primary screen
-    screen = QGuiApplication.primaryScreen()
-    if screen is None:
+        # fallback: the old Qt grab of the primary screen
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        full = screen.grabWindow(0)
+        if full.isNull():
+            return None
+        bounds = QRect(0, 0, full.width(), full.height())
+        for factor in pixmap_crop_hints(full, screen):
+            candidate = scale_rect(target, factor, bounds)
+            if candidate.width() >= 4 and candidate.height() >= 4:
+                return full.copy(candidate)
         return None
-    full = screen.grabWindow(0)
-    if full.isNull():
-        return None
-    bounds = QRect(0, 0, full.width(), full.height())
-    for factor in pixmap_crop_hints(full, screen):
-        candidate = scale_rect(target, factor, bounds)
-        if candidate.width() >= 4 and candidate.height() >= 4:
-            return full.copy(candidate)
-    return None
+    finally:
+        if saved_cursor is not None:
+            try:
+                ctypes.windll.user32.SetCursorPos(saved_cursor[0], saved_cursor[1])
+            except Exception:
+                pass
 
 
 SHUTTER_NAMES = ("screenshot.wav", "shutter.wav")

@@ -57,7 +57,24 @@ DEFAULT_CONFIG = {
     "ui": {},                       # column widths, header states
     "screenshot": {"path": "", "hotkey": "", "sound": "",
                    "trim_bars": True, "copy_clipboard": False,
+                   "hide_cursor": False,
                    },
+    "vndb": {
+        "api_token": "",
+        "username": "",
+        "user_id": "",
+        "permissions": [],
+        "enable_search": True,
+        "enable_list_sync": False,
+        "sync_labels": [],
+        "auto_sync_on_start": False,
+        "auto_mark_playing": False,
+    },
+    "ratings": {
+        "fetch_vndb_rank": True,
+        "fetch_bangumi": True,
+        "fetch_erogamescape": True,
+    },
 }
 
 
@@ -160,6 +177,10 @@ def load_config():
                 merged.pop(stale, None)
             merged["screenshot"] = {**DEFAULT_CONFIG["screenshot"],
                                     **(merged.get("screenshot") or {})}
+            merged["vndb"] = {**DEFAULT_CONFIG["vndb"],
+                              **(merged.get("vndb") or {})}
+            merged["ratings"] = {**DEFAULT_CONFIG["ratings"],
+                                 **(merged.get("ratings") or {})}
             # the whole-screen hotkey is gone: the one hotkey follows Magpie by
             # itself now, so it takes over that combo when it had none
             shot = merged["screenshot"]
@@ -431,6 +452,14 @@ def load_games():
             for game in games:
                 game.setdefault("total_seconds", 0)
                 game.setdefault("process_names", [])
+                if "manual" not in game:
+                    has_exe = bool((game.get("exe") or "").strip())
+                    is_synced_only = (
+                        bool(game.get("vndb_synced"))
+                        and not has_exe
+                        and float(game.get("total_seconds") or 0) <= 0
+                    )
+                    game["manual"] = not is_synced_only
             return games
         except Exception as error:
             _quarantine(GAMES_FILE, error)
